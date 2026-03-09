@@ -205,7 +205,6 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
-    year="Sports cards: enter year (e.g. 2017) · Pokemon/Yu-Gi-Oh/TCG: leave blank",
     set_name="Set name — start typing for filtered suggestions",
     card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
     is_vintage="Is this a vintage card (pre-1980)?",
@@ -219,7 +218,6 @@ async def grade(
     interaction: discord.Interaction,
     player: str,
     set_name: str,
-    year: int = None,
     card_number: str = None,
     is_vintage: int = 0,
     override_tier: str = None,
@@ -227,7 +225,7 @@ async def grade(
     await interaction.response.defer()
 
     try:
-        # First do a quick sport lookup to detect TCG cards
+        # Check if TCG card — year not required for these
         sport_check = supabase.table("mv_grade_premiums") \
             .select("sport") \
             .ilike("player_name", f"%{player}%") \
@@ -235,15 +233,6 @@ async def grade(
 
         sport = sport_check.data[0]["sport"] if sport_check.data else None
         is_tcg = sport in TCG_CATEGORIES
-
-        # Year is required for sports cards but optional for TCG
-        if not year and not is_tcg:
-            await interaction.followup.send(
-                f"⚠️ **Year is required for sports cards.**\n"
-                f"Re-run the command and enter the card year (e.g. 2017).\n"
-                f"If this is a TCG card (Pokemon, Yu-Gi-Oh, etc.), it may not be in the database yet."
-            )
-            return
 
         query = supabase.table("mv_grade_premiums") \
             .select("player_name, set_name, set_year, card_number, variation, is_rookie, sport, "
@@ -255,8 +244,6 @@ async def grade(
             .ilike("player_name", f"%{player}%") \
             .ilike("set_name", f"%{set_name}%")
 
-        if year:
-            query = query.eq("set_year", year)
         if card_number:
             query = query.ilike("card_number", f"%{card_number}%")
 
@@ -267,10 +254,9 @@ async def grade(
         return
 
     if not result.data:
-        year_str = str(year) if year else "any year"
         await interaction.followup.send(
-            f"No card found for **{player}** in **{set_name}** ({year_str}).\n"
-            f"Try adjusting the name or set — partial matches work."
+            f"No card found for **{player}** in **{set_name}**.\n"
+            f"Try adjusting the name or set — partial matches work. Use card number to narrow results if needed."
         )
         return
 
@@ -450,17 +436,12 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
-        year_val   = interaction.namespace.year
 
         query = supabase.table("mv_grade_premiums").select("set_name, set_year")
 
-        # Filter by player if entered — works for both sports and TCG
+        # Filter by player if entered
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
-
-        # Only filter by year if user actually typed one
-        if year_val:
-            query = query.eq("set_year", int(year_val))
 
         # Filter by what they're typing in the set field
         if current and len(current) >= 1:
