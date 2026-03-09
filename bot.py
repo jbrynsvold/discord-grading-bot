@@ -205,7 +205,7 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
-    year="Card year — required for sports cards, optional for TCG/Pokemon/Yu-Gi-Oh",
+    year="Sports cards: enter year (e.g. 2017) · Pokemon/Yu-Gi-Oh/TCG: leave blank",
     set_name="Set name — start typing for filtered suggestions",
     card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
     is_vintage="Is this a vintage card (pre-1980)?",
@@ -446,23 +446,32 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
         print(f"[ERROR] player_autocomplete: {e}")
         return []
 async def set_autocomplete(interaction: discord.Interaction, current: str):
-    if len(current) < 1:
-        return []
     try:
         player_val = interaction.namespace.player
         year_val   = interaction.namespace.year
 
+        # Detect TCG so we skip year filter
+        is_tcg = False
+        if player_val and len(player_val) >= 2:
+            sport_check = supabase.table("mv_grade_premiums") \
+                .select("sport") \
+                .ilike("player_name", f"%{player_val}%") \
+                .limit(1).execute()
+            if sport_check.data:
+                is_tcg = sport_check.data[0].get("sport") in TCG_CATEGORIES
+
         query = supabase.table("mv_grade_premiums").select("set_name, set_year")
 
-        # Filter by year if entered — makes results highly relevant
-        if year_val:
+        # Only filter by year for sports cards when year is provided
+        if year_val and not is_tcg:
             query = query.eq("set_year", int(year_val))
 
-        # Filter by player too if entered — narrows to only sets this player appears in
+        # Always filter by player if entered
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
 
-        if current:
+        # Filter by what they're typing
+        if current and len(current) >= 1:
             query = query.ilike("set_name", f"%{current}%")
 
         result = query.limit(100).execute()
@@ -478,7 +487,8 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
             if len(choices) >= 25:
                 break
         return choices
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] set_autocomplete: {e}")
         return []
 
 
