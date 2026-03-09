@@ -27,6 +27,9 @@ def fv(val):
     """Safe float conversion — returns None if null."""
     return float(val) if val is not None else None
 
+# Categories that don't require a year for meaningful search
+TCG_CATEGORIES = {"Pokemon", "Yu-Gi-Oh", "Other TCG", "Non-Sport Vintage"}
+
 # ===========================================================================
 # SELL COMMAND DATA
 # ===========================================================================
@@ -201,9 +204,10 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
-    player="Player name — start typing for suggestions",
-    year="Card year (e.g. 2017)",
-    set_name="Set name — start typing after entering year for filtered suggestions",
+    player="Player or character name — start typing for suggestions",
+    year="Card year — required for sports cards, optional for TCG/Pokemon/Yu-Gi-Oh",
+    set_name="Set name — start typing for filtered suggestions",
+    card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
     is_vintage="Is this a vintage card (pre-1980)?",
     override_tier="Optional: use a faster tier (e.g. Express, Regular) for paid members",
 )
@@ -214,32 +218,58 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 async def grade(
     interaction: discord.Interaction,
     player: str,
-    year: int,
     set_name: str,
+    year: int = None,
+    card_number: str = None,
     is_vintage: int = 0,
     override_tier: str = None,
 ):
     await interaction.response.defer()
 
     try:
-        result = supabase.table("mv_grade_premiums") \
-            .select("player_name, set_name, set_year, card_number, variation, is_rookie, "
+        # First do a quick sport lookup to detect TCG cards
+        sport_check = supabase.table("mv_grade_premiums") \
+            .select("sport") \
+            .ilike("player_name", f"%{player}%") \
+            .limit(1).execute()
+
+        sport = sport_check.data[0]["sport"] if sport_check.data else None
+        is_tcg = sport in TCG_CATEGORIES
+
+        # Year is required for sports cards but optional for TCG
+        if not year and not is_tcg:
+            await interaction.followup.send(
+                f"⚠️ **Year is required for sports cards.**\n"
+                f"Re-run the command and enter the card year (e.g. 2017).\n"
+                f"If this is a TCG card (Pokemon, Yu-Gi-Oh, etc.), it may not be in the database yet."
+            )
+            return
+
+        query = supabase.table("mv_grade_premiums") \
+            .select("player_name, set_name, set_year, card_number, variation, is_rookie, sport, "
                     "raw_price, psa9_price, psa10_price, grading_score, "
                     "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
                     "bgs9_price, bgs95_price, bgs10_price, "
                     "sgc9_price, sgc95_price, sgc10_price, "
                     "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price") \
             .ilike("player_name", f"%{player}%") \
-            .ilike("set_name", f"%{set_name}%") \
-            .eq("set_year", year) \
-            .limit(1).execute()
+            .ilike("set_name", f"%{set_name}%")
+
+        if year:
+            query = query.eq("set_year", year)
+        if card_number:
+            query = query.ilike("card_number", f"%{card_number}%")
+
+        result = query.limit(1).execute()
+
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Database query failed: {e}")
         return
 
     if not result.data:
+        year_str = str(year) if year else "any year"
         await interaction.followup.send(
-            f"No card found for **{player}** in **{set_name} ({year})**.\n"
+            f"No card found for **{player}** in **{set_name}** ({year_str}).\n"
             f"Try adjusting the name or set — partial matches work."
         )
         return
@@ -396,7 +426,7 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
         return []
     try:
         result = supabase.table("mv_grade_premiums") \
-            .select("player_name") \
+            .select("player_name, sport") \
             .ilike("player_name", f"{current}%") \
             .limit(50).execute()
         seen = set()
@@ -405,7 +435,10 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
             name = row["player_name"]
             if name not in seen:
                 seen.add(name)
-                choices.append(app_commands.Choice(name=name, value=name))
+                sport = row.get("sport", "")
+                # Add sport tag to label so users can distinguish e.g. "Charizard (Pokemon)"
+                label = f"{name} ({sport})" if sport and len(name) + len(sport) < 95 else name
+                choices.append(app_commands.Choice(name=label, value=name))
             if len(choices) >= 25:
                 break
         return choices
