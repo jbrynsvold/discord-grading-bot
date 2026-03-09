@@ -230,6 +230,7 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
     set_name="Set name — start typing for filtered suggestions",
+    variation="Optional: parallel/variation (e.g. Blue Refractor, Gold Prizm) — leave blank for base",
     card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
     is_vintage="Is this a vintage card (pre-1980)?",
     override_tier="Optional: use a faster tier (e.g. Express, Regular) for paid members",
@@ -242,6 +243,7 @@ async def grade(
     interaction: discord.Interaction,
     player: str,
     set_name: str,
+    variation: str = None,
     card_number: str = None,
     is_vintage: int = 0,
     override_tier: str = None,
@@ -268,10 +270,32 @@ async def grade(
             .ilike("player_name", f"%{player}%") \
             .ilike("set_name", f"%{set_name}%")
 
+        if variation:
+            # User picked a specific parallel — match it exactly (trimmed)
+            query = query.ilike("variation", variation.strip())
+        else:
+            # Default to base card (null variation)
+            query = query.is_("variation", "null")
+
         if card_number:
             query = query.ilike("card_number", f"%{card_number}%")
 
         result = query.limit(1).execute()
+
+        # If no base found and no variation specified, fall back to any variation
+        if not result.data and not variation:
+            query2 = supabase.table("mv_grade_premiums") \
+                .select("player_name, set_name, set_year, card_number, variation, is_rookie, sport, "
+                        "raw_price, psa9_price, psa10_price, grading_score, "
+                        "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
+                        "bgs9_price, bgs95_price, bgs10_price, "
+                        "sgc9_price, sgc95_price, sgc10_price, "
+                        "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price") \
+                .ilike("player_name", f"%{player}%") \
+                .ilike("set_name", f"%{set_name}%")
+            if card_number:
+                query2 = query2.ilike("card_number", f"%{card_number}%")
+            result = query2.limit(1).execute()
 
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Database query failed: {e}")
@@ -486,6 +510,41 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
         return choices
     except Exception as e:
         print(f"[ERROR] set_autocomplete: {e}")
+        return []
+
+
+@grade.autocomplete("variation")
+async def variation_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        player_val  = interaction.namespace.player
+        set_val     = interaction.namespace.set_name
+
+        query = supabase.table("mv_grade_premiums") \
+            .select("variation") \
+            .not_.is_("variation", "null")
+
+        if player_val and len(player_val) >= 2:
+            query = query.ilike("player_name", f"%{player_val}%")
+        if set_val and len(set_val) >= 2:
+            query = query.ilike("set_name", f"%{set_val}%")
+        if current and len(current) >= 1:
+            query = query.ilike("variation", f"%{current}%")
+
+        result = query.limit(100).execute()
+
+        seen = set()
+        choices = []
+        for row in result.data:
+            val = (row["variation"] or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            choices.append(app_commands.Choice(name=val, value=val))
+            if len(choices) >= 25:
+                break
+        return choices
+    except Exception as e:
+        print(f"[ERROR] variation_autocomplete: {e}")
         return []
 
 
