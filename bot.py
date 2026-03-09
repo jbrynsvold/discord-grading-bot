@@ -427,7 +427,7 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
     try:
         result = supabase.table("mv_grade_premiums") \
             .select("player_name, sport") \
-            .ilike("player_name", f"{current}%") \
+            .ilike("player_name", f"%{current}%") \
             .limit(50).execute()
         seen = set()
         choices = []
@@ -442,11 +442,9 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
             if len(choices) >= 25:
                 break
         return choices
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] player_autocomplete: {e}")
         return []
-
-
-@grade.autocomplete("set_name")
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 1:
         return []
