@@ -445,6 +445,8 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
     except Exception as e:
         print(f"[ERROR] player_autocomplete: {e}")
         return []
+
+@grade.autocomplete("set_name")
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
