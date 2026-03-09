@@ -123,17 +123,41 @@ def get_grader_rec(raw, psa9, psa10, grading_score, vintage):
     if psa10 and psa10 < 300: return "CGC"
     return "PSA"
 
-def should_grade(raw, psa9, grading_cost, grading_score):
+def should_grade(raw, psa9, psa10, grading_cost, grading_score, psa9_mult):
     if not raw or not psa9:
-        return None, "Not enough price data to make a recommendation."
+        return None, "Not enough price data to make a recommendation.", False
+
+    total_cost = raw + grading_cost
+    psa10_mult_actual = (psa10 / total_cost) if (psa10 and total_cost > 0) else 0
     uplift = psa9 - raw - grading_cost
-    if grading_score < 5.0:
-        return False, f"Grading score of {grading_score:.1f}/10 is too low — card unlikely to grade well."
+    hard_to_grade = psa9_mult and psa9_mult >= 5.0
+
+    warning = ""
+    if hard_to_grade:
+        warning = f"\n⚠️ PSA 9 is {psa9_mult:.1f}x raw — this card is historically difficult to grade. High risk of low grade or rejection. Verify condition carefully before submitting."
+
+    # Strong yes: PSA 10 is 2.5x+ of total investment
+    if psa10_mult_actual >= 2.5:
+        reason = f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}"
+        return True, reason, hard_to_grade
+
+    # Clear no: PSA 9 doesn't cover costs
     if uplift < 0:
-        return False, f"PSA 9 nets you {format_currency(uplift)} after cost. Sell raw."
+        reason = f"PSA 9 nets you {format_currency(uplift)} after grading cost. Sell raw.{warning}"
+        return False, reason, hard_to_grade
+
+    # Marginal: use grading score as tiebreaker
     if uplift < 30:
-        return False, f"Upside of only {format_currency(uplift)} is marginal. Only grade if condition is pristine."
-    return True, f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the grading cost."
+        if grading_score >= 50:
+            reason = f"Marginal uplift ({format_currency(uplift)}) but grading score of {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}"
+            return True, reason, hard_to_grade
+        else:
+            reason = f"Upside of only {format_currency(uplift)} and grading score of {grading_score:.0f}/100 is below average. Sell raw.{warning}"
+            return False, reason, hard_to_grade
+
+    # Clear yes
+    reason = f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the ${grading_cost:.2f} grading cost.{warning}"
+    return True, reason, hard_to_grade
 
 # ===========================================================================
 # Bot setup
