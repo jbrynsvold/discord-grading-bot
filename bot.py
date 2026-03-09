@@ -450,27 +450,17 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
         player_val = interaction.namespace.player
         year_val   = interaction.namespace.year
 
-        # Detect TCG so we skip year filter
-        is_tcg = False
-        if player_val and len(player_val) >= 2:
-            sport_check = supabase.table("mv_grade_premiums") \
-                .select("sport") \
-                .ilike("player_name", f"%{player_val}%") \
-                .limit(1).execute()
-            if sport_check.data:
-                is_tcg = sport_check.data[0].get("sport") in TCG_CATEGORIES
-
         query = supabase.table("mv_grade_premiums").select("set_name, set_year")
 
-        # Only filter by year for sports cards when year is provided
-        if year_val and not is_tcg:
-            query = query.eq("set_year", int(year_val))
-
-        # Always filter by player if entered
+        # Filter by player if entered — works for both sports and TCG
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
 
-        # Filter by what they're typing
+        # Only filter by year if user actually typed one
+        if year_val:
+            query = query.eq("set_year", int(year_val))
+
+        # Filter by what they're typing in the set field
         if current and len(current) >= 1:
             query = query.ilike("set_name", f"%{current}%")
 
