@@ -183,7 +183,7 @@ async def on_ready():
     grading_cost="Grading cost if applicable (default: 0)",
 )
 async def sell(interaction: discord.Interaction, sale_price: float, purchase_price: float = 0.0, grading_cost: float = 0.0):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
     tier_data = get_tier(sale_price)
 
     if tier_data.get("broker_note"):
@@ -248,7 +248,7 @@ async def grade(
     is_vintage: int = 0,
     override_tier: str = None,
 ):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     try:
         # Check if TCG card — year not required for these
