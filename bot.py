@@ -344,7 +344,7 @@ async def grade(
     embed = discord.Embed(
         title=f"🔎 Grade Analysis — {card['player_name']}",
         description=(
-            f"{card['set_year']} {card['set_name']} #{card.get('card_number', '?')}"
+            f"{card['set_name']} #{card.get('card_number', '?')}"
             + (f" · {card['variation']}" if card.get('variation') else "")
             + (" · 🌟 Rookie" if card.get('is_rookie') else "")
         ),
