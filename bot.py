@@ -27,7 +27,6 @@ def fv(val):
     """Safe float conversion — returns None if null."""
     return float(val) if val is not None else None
 
-# Categories that don't require a year for meaningful search
 TCG_CATEGORIES = {"Pokemon", "Yu-Gi-Oh", "Other TCG", "Non-Sport Vintage"}
 
 # ===========================================================================
@@ -126,38 +125,23 @@ def get_grader_rec(raw, psa9, psa10, grading_score, vintage):
 def should_grade(raw, psa9, psa10, grading_cost, grading_score, psa9_mult):
     if not raw or not psa9:
         return None, "Not enough price data to make a recommendation.", False
-
     total_cost = raw + grading_cost
     psa10_mult_actual = (psa10 / total_cost) if (psa10 and total_cost > 0) else 0
     uplift = psa9 - raw - grading_cost
     hard_to_grade = psa9_mult and psa9_mult >= 5.0
-
     warning = ""
     if hard_to_grade:
         warning = f"\n⚠️ PSA 9 is {psa9_mult:.1f}x raw — this card is historically difficult to grade. High risk of low grade or rejection. Verify condition carefully before submitting."
-
-    # Strong yes: PSA 10 is 2.5x+ of total investment
     if psa10_mult_actual >= 2.5:
-        reason = f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}"
-        return True, reason, hard_to_grade
-
-    # Clear no: PSA 9 doesn't cover costs
+        return True, f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}", hard_to_grade
     if uplift < 0:
-        reason = f"PSA 9 nets you {format_currency(uplift)} after grading cost. Sell raw.{warning}"
-        return False, reason, hard_to_grade
-
-    # Marginal: use grading score as tiebreaker
+        return False, f"PSA 9 nets you {format_currency(uplift)} after grading cost. Sell raw.{warning}", hard_to_grade
     if uplift < 30:
         if grading_score >= 50:
-            reason = f"Marginal uplift ({format_currency(uplift)}) but grading score of {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}"
-            return True, reason, hard_to_grade
+            return True, f"Marginal uplift ({format_currency(uplift)}) but grading score of {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}", hard_to_grade
         else:
-            reason = f"Upside of only {format_currency(uplift)} and grading score of {grading_score:.0f}/100 is below average. Sell raw.{warning}"
-            return False, reason, hard_to_grade
-
-    # Clear yes
-    reason = f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the ${grading_cost:.2f} grading cost.{warning}"
-    return True, reason, hard_to_grade
+            return False, f"Upside of only {format_currency(uplift)} and grading score of {grading_score:.0f}/100 is below average. Sell raw.{warning}", hard_to_grade
+    return True, f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the ${grading_cost:.2f} grading cost.{warning}", hard_to_grade
 
 # ===========================================================================
 # Bot setup
@@ -185,21 +169,18 @@ async def on_ready():
 async def sell(interaction: discord.Interaction, sale_price: float, purchase_price: float = 0.0, grading_cost: float = 0.0):
     await interaction.response.defer(ephemeral=True)
     tier_data = get_tier(sale_price)
-
     if tier_data.get("broker_note"):
         embed = discord.Embed(title=f"💎 Elite Tier — ${sale_price:,.0f}", description=tier_data["advice"], color=0xFFD700)
         embed.add_field(name="Who to Contact", value="• **PWCC Premier** — pwccmarketplace.com\n• **Goldin** — goldin.co\n• **Heritage Auctions** — ha.com\n• **Probstein123** — probstein123.com", inline=False)
         embed.set_footer(text="Fees and terms are negotiable at this level. Get quotes from multiple houses.")
         await interaction.followup.send(embed=embed)
         return
-
     color_map = {"Budget": 0x57F287, "Mid": 0x5865F2, "High": 0xFEE75C, "Premium": 0xED4245}
     embed = discord.Embed(title=f"💰 Sell Analysis — ${sale_price:,.2f}", color=color_map.get(tier_data["tier"], 0x5865F2))
     parts = [f"**Sale Price:** ${sale_price:,.2f}"]
     if purchase_price > 0: parts.append(f"**Paid:** ${purchase_price:,.2f}")
     if grading_cost > 0: parts.append(f"**Grading:** ${grading_cost:,.2f}")
     embed.description = "  ·  ".join(parts)
-
     lines = []
     for key in tier_data["platforms"]:
         p = PLATFORMS[key]
@@ -208,29 +189,36 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
         star = " ⭐" if key == tier_data["recommended"] else ""
         fee_str = "No fees" if p["fee_pct"] == 0 and p["fixed_fee"] == 0 else (f"{p['fee_pct']*100:.1f}% + ${p['fixed_fee']:.2f}" if p["fixed_fee"] > 0 else f"{p['fee_pct']*100:.1f}%")
         lines.append(f"{p['emoji']} **{p['name']}**{star}\n  Fee: {fee_str} (${fee_amt:,.2f})  →  Net: **{format_currency(net)}**\n  _{p['note']}_")
-
     embed.add_field(name=f"📊 Platform Breakdown ({tier_data['tier']} Tier)", value="\n\n".join(lines), inline=False)
-
     if tier_data["recommended"]:
         bp = PLATFORMS[tier_data["recommended"]]
         best_net = calc_net(sale_price, bp["fee_pct"], bp["fixed_fee"], purchase_price, grading_cost)
         embed.add_field(name="⭐ Recommendation", value=f"**{bp['name']}** — nets you **{format_currency(best_net)}**\n{tier_data['advice']}", inline=False)
-
     if tier_data.get("consignment_note"):
         embed.add_field(name="📋 Consignment Tip", value="Get quotes from multiple houses before committing. Rates shown are standard — some are negotiable.", inline=False)
-
     embed.set_footer(text="Fees are estimates. Always verify current rates before selling.")
     await interaction.followup.send(embed=embed)
 
 # ===========================================================================
-# /grade — with autocomplete on player and set_name
+# /grade — with autocomplete on player, set_name, variation, and insert_set
 # ===========================================================================
+
+# Shared select columns
+GRADE_SELECT = (
+    "player_name, set_name, set_year, card_number, variation, insert_set, is_rookie, sport, "
+    "raw_price, psa9_price, psa10_price, grading_score, "
+    "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
+    "bgs9_price, bgs95_price, bgs10_price, "
+    "sgc9_price, sgc95_price, sgc10_price, "
+    "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price"
+)
 
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
     set_name="Set name — start typing for filtered suggestions",
     variation="Optional: parallel/variation (e.g. Blue Refractor, Gold Prizm) — leave blank for base",
+    insert_set="Optional: insert set name (e.g. Deep Space, Luck of the Lottery) — leave blank for non-inserts",
     card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
     is_vintage="Is this a vintage card (pre-1980)?",
     override_tier="Optional: use a faster tier (e.g. Express, Regular) for paid members",
@@ -244,6 +232,7 @@ async def grade(
     player: str,
     set_name: str,
     variation: str = None,
+    insert_set: str = None,
     card_number: str = None,
     is_vintage: int = 0,
     override_tier: str = None,
@@ -251,48 +240,37 @@ async def grade(
     await interaction.response.defer(ephemeral=True)
 
     try:
-        # Check if TCG card — year not required for these
-        sport_check = supabase.table("mv_grade_premiums") \
-            .select("sport") \
-            .ilike("player_name", f"%{player}%") \
-            .limit(1).execute()
-
-        sport = sport_check.data[0]["sport"] if sport_check.data else None
-        is_tcg = sport in TCG_CATEGORIES
-
         query = supabase.table("mv_grade_premiums") \
-            .select("player_name, set_name, set_year, card_number, variation, is_rookie, sport, "
-                    "raw_price, psa9_price, psa10_price, grading_score, "
-                    "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
-                    "bgs9_price, bgs95_price, bgs10_price, "
-                    "sgc9_price, sgc95_price, sgc10_price, "
-                    "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price") \
+            .select(GRADE_SELECT) \
             .ilike("player_name", f"%{player}%") \
             .ilike("set_name", f"%{set_name}%")
 
         if variation:
-            # User picked a specific parallel — match it exactly (trimmed)
             query = query.ilike("variation", variation.strip())
         else:
-            # Default to base card (null variation)
             query = query.is_("variation", "null")
+
+        # If insert_set specified, filter to it. Otherwise exclude inserts (base only).
+        if insert_set:
+            query = query.ilike("insert_set", f"%{insert_set}%")
+        else:
+            query = query.is_("insert_set", "null")
 
         if card_number:
             query = query.ilike("card_number", f"%{card_number}%")
 
         result = query.limit(1).execute()
 
-        # If no base found and no variation specified, fall back to any variation
-        if not result.data and not variation:
+        # Fallback: relax insert_set filter if no match
+        if not result.data:
             query2 = supabase.table("mv_grade_premiums") \
-                .select("player_name, set_name, set_year, card_number, variation, is_rookie, sport, "
-                        "raw_price, psa9_price, psa10_price, grading_score, "
-                        "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
-                        "bgs9_price, bgs95_price, bgs10_price, "
-                        "sgc9_price, sgc95_price, sgc10_price, "
-                        "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price") \
+                .select(GRADE_SELECT) \
                 .ilike("player_name", f"%{player}%") \
                 .ilike("set_name", f"%{set_name}%")
+            if variation:
+                query2 = query2.ilike("variation", variation.strip())
+            if insert_set:
+                query2 = query2.ilike("insert_set", f"%{insert_set}%")
             if card_number:
                 query2 = query2.ilike("card_number", f"%{card_number}%")
             result = query2.limit(1).execute()
@@ -309,29 +287,21 @@ async def grade(
         return
 
     card = result.data[0]
-    raw   = fv(card.get("raw_price"))
-    psa9  = fv(card.get("psa9_price"))
-    psa10 = fv(card.get("psa10_price"))
-    gs    = fv(card.get("grading_score")) or 0.0
+    raw    = fv(card.get("raw_price"))
+    psa9   = fv(card.get("psa9_price"))
+    psa10  = fv(card.get("psa10_price"))
+    gs     = fv(card.get("grading_score")) or 0.0
     vintage = bool(is_vintage)
-
-    # BGS
-    bgs9  = fv(card.get("bgs9_price"))
-    bgs95 = fv(card.get("bgs95_price"))
-    bgs10 = fv(card.get("bgs10_price"))
-
-    # SGC
-    sgc9  = fv(card.get("sgc9_price"))
-    sgc95 = fv(card.get("sgc95_price"))
-    sgc10 = fv(card.get("sgc10_price"))
-
-    # CGC
+    bgs9   = fv(card.get("bgs9_price"))
+    bgs95  = fv(card.get("bgs95_price"))
+    bgs10  = fv(card.get("bgs10_price"))
+    sgc9   = fv(card.get("sgc9_price"))
+    sgc95  = fv(card.get("sgc95_price"))
+    sgc10  = fv(card.get("sgc10_price"))
     cgc9   = fv(card.get("cgc9_price"))
     cgc95  = fv(card.get("cgc95_price"))
     cgc10  = fv(card.get("cgc10_price"))
     cgc10p = fv(card.get("cgc10_pristine_price"))
-
-    # Price multipliers needed for recommendation logic
     psa9_mult  = fv(card.get("raw_to_psa9_mult"))
     psa10_mult = fv(card.get("raw_to_psa10_mult"))
     p9p10_mult = fv(card.get("psa9_to_psa10_mult"))
@@ -346,6 +316,7 @@ async def grade(
         description=(
             f"{card['set_name']} #{card.get('card_number', '?')}"
             + (f" · {card['variation']}" if card.get('variation') else "")
+            + (f" · 📋 {card['insert_set']}" if card.get('insert_set') else "")
             + (" · 🌟 Rookie" if card.get('is_rookie') else "")
         ),
         color=color,
@@ -362,7 +333,6 @@ async def grade(
         inline=False,
     )
 
-    # Grading score (0-100 scale)
     score_label = (
         "🟢 Excellent — strong candidate for high grade" if gs >= 70
         else "🟡 Average — grade outcome uncertain" if gs >= 40
@@ -373,13 +343,11 @@ async def grade(
     embed.add_field(name="🎯 Should You Grade?", value=f"{grade_display}\n{grade_reason}", inline=True)
     embed.add_field(name="\u200b", value="\u200b", inline=False)
 
-    # Grader comparison — one field per grader to stay under Discord's 1024 char limit
     embed.add_field(name="🏢 Grader Comparison", value="Cheapest no-membership tier shown. Use `override_tier` for faster options.", inline=False)
 
     for gk, gd in GRADERS.items():
         tier_name = override_tier if (override_tier and override_tier in gd["tiers"]) else gd["default_tier"]
         cost, turnaround, max_val, _ = gd["tiers"][tier_name]
-        max_str = f"max ${max_val:,}" if max_val else "no cap"
         rec_tag = " ⭐" if gk == rec_grader else ""
 
         if gk == "PSA":
@@ -426,11 +394,11 @@ async def grade(
                 uplift = (psa9 - raw - cost) if (psa9 and raw) else None
                 price_str = f"_No CGC sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
 
-        field_value = (
-            f"Cost: **${cost:.2f}** · {turnaround}\n"
-            f"{price_str}"
+        embed.add_field(
+            name=f"{gd['emoji']} {gk}{rec_tag}",
+            value=f"Cost: **${cost:.2f}** · {turnaround}\n{price_str}",
+            inline=True,
         )
-        embed.add_field(name=f"{gd['emoji']} {gk}{rec_tag}", value=field_value, inline=True)
 
     embed.add_field(
         name="💳 Membership Savings",
@@ -470,7 +438,6 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
             if name not in seen:
                 seen.add(name)
                 sport = row.get("sport", "")
-                # Add sport tag to label so users can distinguish e.g. "Charizard (Pokemon)"
                 label = f"{name} ({sport})" if sport and len(name) + len(sport) < 95 else name
                 choices.append(app_commands.Choice(name=label, value=name))
             if len(choices) >= 25:
@@ -484,19 +451,12 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
-
         query = supabase.table("mv_grade_premiums").select("set_name, set_year")
-
-        # Filter by player if entered
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
-
-        # Filter by what they're typing in the set field
         if current and len(current) >= 1:
             query = query.ilike("set_name", f"%{current}%")
-
         result = query.limit(100).execute()
-
         seen = set()
         choices = []
         for row in result.data:
@@ -512,26 +472,21 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
         print(f"[ERROR] set_autocomplete: {e}")
         return []
 
-
 @grade.autocomplete("variation")
 async def variation_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val  = interaction.namespace.player
-        set_val     = interaction.namespace.set_name
-
+        player_val = interaction.namespace.player
+        set_val    = interaction.namespace.set_name
         query = supabase.table("mv_grade_premiums") \
             .select("variation") \
             .not_.is_("variation", "null")
-
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if set_val and len(set_val) >= 2:
             query = query.ilike("set_name", f"%{set_val}%")
         if current and len(current) >= 1:
             query = query.ilike("variation", f"%{current}%")
-
         result = query.limit(100).execute()
-
         seen = set()
         choices = []
         for row in result.data:
@@ -545,6 +500,36 @@ async def variation_autocomplete(interaction: discord.Interaction, current: str)
         return choices
     except Exception as e:
         print(f"[ERROR] variation_autocomplete: {e}")
+        return []
+
+@grade.autocomplete("insert_set")
+async def insert_set_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        player_val = interaction.namespace.player
+        set_val    = interaction.namespace.set_name
+        query = supabase.table("mv_grade_premiums") \
+            .select("insert_set") \
+            .not_.is_("insert_set", "null")
+        if player_val and len(player_val) >= 2:
+            query = query.ilike("player_name", f"%{player_val}%")
+        if set_val and len(set_val) >= 2:
+            query = query.ilike("set_name", f"%{set_val}%")
+        if current and len(current) >= 1:
+            query = query.ilike("insert_set", f"%{current}%")
+        result = query.limit(100).execute()
+        seen = set()
+        choices = []
+        for row in result.data:
+            val = (row["insert_set"] or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            choices.append(app_commands.Choice(name=val, value=val))
+            if len(choices) >= 25:
+                break
+        return choices
+    except Exception as e:
+        print(f"[ERROR] insert_set_autocomplete: {e}")
         return []
 
 
