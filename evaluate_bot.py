@@ -511,45 +511,19 @@ async def eval_player_autocomplete(interaction: discord.Interaction, current: st
     if len(current) < 2:
         return []
     try:
-        # Query cards table directly — has btree index on player_name, much faster
-        result = (
-            supabase.table("cards")
-            .select("player_name")
-            .ilike("player_name", f"%{current}%")
-            .limit(100)
-            .execute()
-        )
+        # Use RPC function that queries sports + tcg schemas via trigram indexes
+        result = supabase.rpc(
+            "search_player_names",
+            {"p_search": current, "p_limit": 25}
+        ).execute()
 
-        canonical_names = set()
-        if len(result.data) < 5:
-            # Fallback: search canonical_name for EX/GX/VMAX etc.
-            result2 = (
-                supabase.table("cards")
-                .select("player_name, canonical_name")
-                .ilike("canonical_name", f"%{current}%")
-                .limit(50)
-                .execute()
-            )
-            existing = {r["player_name"] for r in result.data}
-            for row in result2.data:
-                if row["player_name"] not in existing:
-                    canonical_names.add(row["player_name"])
-            result.data = result.data + result2.data
-
-        seen = set()
         choices = []
-        for row in result.data:
-            name = row["player_name"]
-            if name in seen:
+        for row in (result.data or []):
+            name = row.get("result_name", "")
+            if not name:
                 continue
-            seen.add(name)
-            fuzzy = " ~" if name in canonical_names else ""
-            label = f"{name}{fuzzy}"
-            if len(label) > 100:
-                label = label[:97] + "..."
+            label = name if len(name) <= 100 else name[:97] + "..."
             choices.append(app_commands.Choice(name=label, value=name))
-            if len(choices) >= 25:
-                break
         return choices
     except Exception as e:
         print(f"[ERROR] eval_player_autocomplete: {e}")
