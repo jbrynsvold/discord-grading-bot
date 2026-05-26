@@ -511,18 +511,21 @@ async def eval_player_autocomplete(interaction: discord.Interaction, current: st
     if len(current) < 2:
         return []
     try:
+        # Query cards table directly — has btree index on player_name, much faster
         result = (
-            supabase.table("mv_card_metrics")
-            .select("player_name, sport")
+            supabase.table("cards")
+            .select("player_name")
             .ilike("player_name", f"%{current}%")
             .limit(100)
             .execute()
         )
+
         canonical_names = set()
         if len(result.data) < 5:
+            # Fallback: search canonical_name for EX/GX/VMAX etc.
             result2 = (
-                supabase.table("mv_card_metrics")
-                .select("player_name, sport, canonical_name")
+                supabase.table("cards")
+                .select("player_name, canonical_name")
                 .ilike("canonical_name", f"%{current}%")
                 .limit(50)
                 .execute()
@@ -540,9 +543,8 @@ async def eval_player_autocomplete(interaction: discord.Interaction, current: st
             if name in seen:
                 continue
             seen.add(name)
-            sport = row.get("sport", "")
             fuzzy = " ~" if name in canonical_names else ""
-            label = f"{name} ({sport}){fuzzy}"
+            label = f"{name}{fuzzy}"
             if len(label) > 100:
                 label = label[:97] + "..."
             choices.append(app_commands.Choice(name=label, value=name))
@@ -558,29 +560,40 @@ async def eval_player_autocomplete(interaction: discord.Interaction, current: st
 async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
+        # Join cards -> card_sets for fast indexed lookup
         query = (
-            supabase.table("mv_card_metrics")
-            .select("set_name, set_year, current_price")
+            supabase.table("cards")
+            .select("player_name, canonical_name, card_sets(name, release_year)")
         )
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if current and len(current) >= 1:
-            query = query.ilike("set_name", f"%{current}%")
+            query = query.ilike("card_sets.name", f"%{current}%")
         result = query.limit(100).execute()
+
+        from collections import Counter
+        rows_by_set = {}
+        set_count = Counter()
+        for row in result.data:
+            cs = row.get("card_sets") or {}
+            set_name = cs.get("name")
+            year = cs.get("release_year", "?")
+            if not set_name:
+                continue
+            set_count[set_name] += 1
+            if set_name not in rows_by_set:
+                rows_by_set[set_name] = year
 
         seen = set()
         choices = []
-        for row in result.data:
-            val = row["set_name"]
-            if val in seen:
+        for set_name, year in rows_by_set.items():
+            if set_name in seen:
                 continue
-            seen.add(val)
-            price = fv(row.get("current_price"))
-            price_str = f" — ${price:.0f}" if price else ""
-            label = f"{val} ({row.get('set_year', '?')}){price_str}"
+            seen.add(set_name)
+            label = f"{set_name} ({year})"
             if len(label) > 100:
                 label = label[:97] + "..."
-            choices.append(app_commands.Choice(name=label, value=val))
+            choices.append(app_commands.Choice(name=label, value=set_name))
             if len(choices) >= 25:
                 break
         return choices
@@ -591,10 +604,12 @@ async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
 
 @evaluate.autocomplete("grade")
 async def eval_grade_autocomplete(interaction: discord.Interaction, current: str):
-    """Autocomplete grade options filtered by player + set already entered."""
+    """Autocomplete grade options — only hits mv_card_metrics once player+set known."""
     try:
         player_val = interaction.namespace.player
         set_val    = interaction.namespace.set_name
+        # By the time grade is being typed we have player+set — safe to hit mv_card_metrics
+        # with specific filters so it uses the index properly
         query = (
             supabase.table("mv_card_metrics")
             .select("grade, current_price")
@@ -644,6 +659,7 @@ async def eval_variation_autocomplete(interaction: discord.Interaction, current:
     try:
         player_val = interaction.namespace.player
         set_val    = interaction.namespace.set_name
+        # player+set already known here — filtered query hits index
         query = (
             supabase.table("mv_card_metrics")
             .select("variation, current_price")
