@@ -482,7 +482,7 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
         # Pass 1: match on player_name
         result = (
             supabase.table("mv_grade_premiums")
-            .select("player_name, sport, raw_price")
+            .select("player_name, sport")
             .ilike("player_name", f"%{current}%")
             .order("raw_sale_count_30d", desc=True)
             .limit(100)
@@ -495,7 +495,7 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
         if len(result.data) < 5:
             result2 = (
                 supabase.table("mv_grade_premiums")
-                .select("player_name, sport, raw_price, canonical_name")
+                .select("player_name, sport, canonical_name")
                 .ilike("canonical_name", f"%{current}%")
                 .order("raw_sale_count_30d", desc=True)
                 .limit(50)
@@ -515,11 +515,9 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
                 continue
             seen.add(name)
             sport = row.get("sport", "")
-            raw = row.get("raw_price")
-            price_str = f" · ${raw:.0f} raw" if raw else ""
             # Flag entries found via canonical search so user knows it's a close match
             fuzzy_tag = " ~" if name in canonical_names else ""
-            label = f"{name} ({sport}){price_str}{fuzzy_tag}"
+            label = f"{name} ({sport}){fuzzy_tag}"
             # Discord choice names max 100 chars
             if len(label) > 100:
                 label = label[:97] + "..."
@@ -536,15 +534,23 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
-        # FIX: include raw_price in select so we can show it in the label
         query = supabase.table("mv_grade_premiums").select("set_name, set_year, raw_price")
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if current and len(current) >= 1:
             query = query.ilike("set_name", f"%{current}%")
-        # Order by most-traded so relevant sets surface first
         query = query.order("raw_sale_count_30d", desc=True)
         result = query.limit(100).execute()
+
+        # Count how many rows each set has for this player
+        # Only show price if exactly 1 card matches (unambiguous)
+        from collections import Counter
+        set_counts = Counter(row["set_name"] for row in result.data)
+        set_price = {}
+        for row in result.data:
+            s = row["set_name"]
+            if s not in set_price:
+                set_price[s] = (row.get("raw_price"), row.get("set_year"))
 
         seen = set()
         choices = []
@@ -553,10 +559,11 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
             if val in seen:
                 continue
             seen.add(val)
-            raw = row.get("raw_price")
-            # FIX: include raw price in label so users can eyeball the right card
-            price_str = f" — ${raw:.0f} raw" if raw else ""
-            label = f"{val} ({row['set_year']}){price_str}"
+            year = set_price[val][1]
+            raw = set_price[val][0]
+            # Show price only when exactly 1 card in this set matches the player
+            price_str = f" — ${float(raw):.0f} raw" if (raw and set_counts[val] == 1) else ""
+            label = f"{val} ({year}){price_str}"
             if len(label) > 100:
                 label = label[:97] + "..."
             choices.append(app_commands.Choice(name=label, value=val))
