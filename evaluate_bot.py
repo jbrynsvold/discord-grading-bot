@@ -176,52 +176,123 @@ def check_hard_rules(m: dict) -> list[dict]:
 # VERDICT
 # ===========================================================================
 
+def build_fail_reason(failed: list[dict], score: int, card: dict) -> str:
+    """
+    Build a plain-English sentence tailored to exactly which checks failed
+    and what the score looks like. No internal terms.
+    """
+    failed_names = {r["name"] for r in failed}
+    days_since = int(float(card.get("days_since_last_sale") or 0))
+    sale_30d   = int(card.get("sale_count_30d") or 0)
+    pct_range  = float(card.get("pct_of_52w_range") or 0)
+
+    # Single failure cases
+    if failed_names == {"HR4 recency"}:
+        return (
+            f"This card hasn't sold in {days_since} days. Without recent sales activity "
+            f"we can't get a reliable read on where it's actually trading. "
+            f"Check back if it starts moving again."
+        )
+    if failed_names == {"HR2 velocity"}:
+        return (
+            f"Trading volume has dropped well below its normal pace — only {sale_30d} sales "
+            f"in the last 30 days. We look for cards with consistent buyer interest before calling a setup."
+        )
+    if failed_names == {"HR3 trend"}:
+        return (
+            f"The price is in a meaningful decline right now. We avoid flagging cards "
+            f"that are actively falling — the setup needs to stabilize first."
+        )
+
+    # Two failures
+    if failed_names == {"HR4 recency", "HR2 velocity"}:
+        return (
+            f"This card has gone quiet — {sale_30d} sales in 30 days and the last one was "
+            f"{days_since} days ago. We need to see active trading before we can evaluate the setup."
+        )
+    if failed_names == {"HR4 recency", "HR3 trend"}:
+        return (
+            f"Price has been declining and the card hasn't sold in {days_since} days. "
+            f"Two red flags at once — not a setup we'd act on right now."
+        )
+    if failed_names == {"HR2 velocity", "HR3 trend"}:
+        return (
+            f"Volume is thin and the price trend is heading down. "
+            f"We look for cards that are trading actively and holding their value before flagging a buy."
+        )
+
+    # All three failed
+    if len(failed) >= 3:
+        return (
+            f"This card isn't trading actively, volume is thin, and the price trend is negative. "
+            f"None of our baseline criteria are met right now."
+        )
+
+    # Score-only failure (all rules passed but score too low)
+    if not failed:
+        if pct_range > 60:
+            return (
+                f"The card has already moved up significantly from its yearly low — "
+                f"it's at {pct_range:.0f}% of its 52-week range. "
+                f"We prefer to flag cards earlier in their setup, not after they've run."
+            )
+        return (
+            f"The card passes our activity checks but the overall setup isn't strong enough yet. "
+            f"It's scoring {score}/100 — we look for 65+ to call a buy. "
+            f"Could improve if volume picks up or price pulls back further."
+        )
+
+    # Fallback
+    return "Doesn't meet our criteria right now."
+
+
 def get_verdict(score: int, rules: list[dict], already_spiked: bool,
-                pct_of_range: float | None) -> tuple[str, int, str]:
+                pct_of_range: float | None, card: dict = None) -> tuple[str, int, str]:
     """
     Returns (verdict_label, embed_color, reasoning).
     """
     all_pass = all(r["passed"] for r in rules)
     failed   = [r for r in rules if not r["passed"]]
+    card     = card or {}
 
     if already_spiked:
         return (
             "Sell / Pass",
             0xED4245,
-            "This card has already spiked in our records. The move has been made — don't chase it.",
+            "This card has already made its move. The window has passed — buying now means chasing.",
         )
 
     if pct_of_range is not None and pct_of_range > 110:
         return (
             "Sell / Pass",
             0xED4245,
-            f"Price is currently {pct_of_range:.0f}% of its 52-week range — trading well above its historical high. Not a buy at this level.",
+            f"At {pct_of_range:.0f}% of its yearly range, this card is trading well above where it's historically topped out. Not a good entry.",
         )
 
     if not all_pass:
-        reasons = "; ".join(r["reason"] for r in failed)
         return (
             "Pass",
             0x888780,
-            f"Doesn't clear our criteria. Failed: {reasons}.",
+            build_fail_reason(failed, score, card),
         )
 
     if score >= 65:
+        range_str = f"sitting at just {pct_of_range:.0f}% of its yearly range" if pct_of_range is not None else "near its yearly low"
         return (
             "Buy",
             0x1D9E75,
-            "Passes all hard rules with a strong GigaScore. Good setup — near lows, liquid, momentum building.",
+            f"Everything checks out. Active trading, healthy volume, and {range_str} — this is the kind of setup we look for.",
         )
     if score >= 55:
         return (
             "Hold",
             0xEF9F27,
-            "Passes hard rules but GigaScore is middling. Worth watching — not a strong entry right now.",
+            f"Passes our activity checks but the setup isn't quite there yet — scoring {score}/100. Worth keeping an eye on but not a strong entry right now.",
         )
     return (
         "Pass",
         0x888780,
-        f"GigaScore of {score} is below our threshold (55). Not enough setup to recommend.",
+        build_fail_reason(failed, score, card),
     )
 
 
@@ -335,7 +406,7 @@ async def evaluate(
 
     # --- Verdict ---
     pct_range = fv(card.get("pct_of_52w_range"))
-    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range)
+    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card)
 
     # --- Build embed ---
     card_name  = card.get("player_name", player)
@@ -352,105 +423,91 @@ async def evaluate(
     subtitle += f" · {card_grade}"
     if is_rookie:  subtitle += " · 🌟 RC"
 
-    embed = discord.Embed(
-        title=f"GIGA Evaluate — {card_name}",
-        description=subtitle,
-        color=color,
-    )
+    # --- Price data ---
+    current  = fv(card.get("current_price"))
+    avg_30d  = fv(card.get("avg_price_30d"))
+    avg_90d  = fv(card.get("avg_price_90d"))
+    low_52w  = fv(card.get("low_52w"))
+    high_52w = fv(card.get("high_52w"))
+    sale_30d = card.get("sale_count_30d") or 0
+    pct_range = fv(card.get("pct_of_52w_range"))
 
-    # Verdict field
-    verdict_icons = {
-        "Buy":          "✅",
-        "Hold":         "🟡",
-        "Pass":         "⬜",
-        "Sell / Pass":  "❌",
-    }
-    icon = verdict_icons.get(verdict, "")
-    embed.add_field(
-        name="Verdict",
-        value=f"{icon} **{verdict}**\n{reasoning}",
-        inline=False,
-    )
-
-    # Watchlist flag (only if watching)
-    if watchlist_entry:
-        flagged = watchlist_entry.get("flagged_date", "")
-        catalyst = watchlist_entry.get("predicted_catalyst", "")
-        call_type = watchlist_entry.get("call_type", "")
-        horizon = watchlist_entry.get("call_horizon_days")
-        wl_str = f"📋 **On GIGA watchlist since {flagged}**"
-        if catalyst:  wl_str += f" · {catalyst.replace('_', ' ')}"
-        if call_type: wl_str += f" · {call_type.replace('_', ' ')}"
-        if horizon:   wl_str += f" · {horizon}d horizon"
-        embed.add_field(name="\u200b", value=wl_str, inline=False)
-
-    # Spike warning
-    if spike_info:
-        sp = spike_info
-        embed.add_field(
-            name="⚠️ Recent spike on record",
-            value=(
-                f"Started {sp.get('spike_start_date')} · "
-                f"Peak {fmt(sp.get('peak_spike_price'))} · "
-                f"+{sp.get('price_change_pct', 0):.0f}%"
-            ),
-            inline=False,
-        )
-
-    # Price snapshot
-    current   = fv(card.get("current_price"))
-    avg_30d   = fv(card.get("avg_price_30d"))
-    avg_90d   = fv(card.get("avg_price_90d"))
-    low_52w   = fv(card.get("low_52w"))
-    high_52w  = fv(card.get("high_52w"))
     trend_str = "N/A"
     if current and avg_30d and avg_30d > 0:
         trend_val = ((current - avg_30d) / avg_30d) * 100
         trend_str = f"{trend_val:+.1f}%"
 
-    embed.add_field(
-        name="Price",
-        value=(
-            f"Current: **{fmt(current)}**\n"
-            f"30d avg: {fmt(avg_30d)}\n"
-            f"90d avg: {fmt(avg_90d)}\n"
-            f"52w: {fmt(low_52w)} – {fmt(high_52w)}\n"
-            f"vs 30d avg: {trend_str}"
-        ),
-        inline=True,
-    )
+    range_str = "N/A"
+    if pct_range is not None:
+        range_str = f"{pct_range:.0f}% of year range"
 
-    # GigaScore breakdown
-    comp_lines = []
-    labels = {
-        "range_pos": "52w range",
-        "liquidity": "Liquidity",
-        "velocity":  "Velocity",
-        "momentum":  "Momentum",
+    # --- Plain English flags for failed rules ---
+    rule_plain = {
+        "HR2 velocity": "Trading volume is too low right now",
+        "HR3 trend":    "Price is in a steep decline",
+        "HR4 recency":  f"Hasn't sold in {int(fv(card.get('days_since_last_sale')) or 0)} days — market gone quiet",
     }
-    for key, (pts, max_pts, detail) in breakdown.items():
-        bar_filled = round(pts / max_pts * 8) if max_pts else 0
-        bar = "█" * bar_filled + "░" * (8 - bar_filled)
-        comp_lines.append(f"`{bar}` {labels[key]}: **{pts}/{max_pts}**")
+    failed_rules = [r for r in rules if not r["passed"]]
+    flag_lines = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in failed_rules]
 
-    embed.add_field(
-        name=f"GigaScore: {score}/100",
-        value="\n".join(comp_lines),
-        inline=True,
+    # --- Score label ---
+    if score >= 65:
+        score_label = "Strong"
+    elif score >= 55:
+        score_label = "Average"
+    else:
+        score_label = "Weak"
+
+    # --- Verdict icons ---
+    verdict_icons = {
+        "Buy":         "✅",
+        "Hold":        "🟡",
+        "Pass":        "⬜",
+        "Sell / Pass": "❌",
+    }
+    icon = verdict_icons.get(verdict, "")
+
+    # --- Build embed ---
+    embed = discord.Embed(
+        title=f"{icon} {verdict} — {card_name}",
+        description=(
+            f"{subtitle}\n\n"
+            f"_{reasoning}_"
+            + (f"\n\n" + "\n".join(flag_lines) if flag_lines else "")
+            + (f"\n\n📋 **On GIGA watchlist since {watchlist_entry.get('flagged_date')}**" if watchlist_entry else "")
+        ),
+        color=color,
     )
 
-    # Hard rules
-    rule_lines = []
-    for r in rules:
-        icon_r = "✓" if r["passed"] else "✗"
-        rule_lines.append(f"`{icon_r}` {r['name']} — {r['reason']}")
+    # Spike warning
+    if spike_info:
+        sp = spike_info
+        embed.add_field(
+            name="⚠️ Already spiked",
+            value=(
+                f"Peaked at {fmt(sp.get('peak_spike_price'))} "
+                f"(+{sp.get('price_change_pct', 0):.0f}%) on {sp.get('spike_start_date')}. "
+                f"Don't chase it."
+            ),
+            inline=False,
+        )
+
+    # 6-stat grid matching Option A mockup
+    embed.add_field(name="Current price", value=f"**{fmt(current)}**", inline=True)
+    embed.add_field(name="30d avg",       value=fmt(avg_30d),           inline=True)
+    embed.add_field(name="90d avg",       value=fmt(avg_90d),           inline=True)
+    embed.add_field(name="Year range",    value=f"{fmt(low_52w)} – {fmt(high_52w)}", inline=True)
+    embed.add_field(name="Sales / 30d",   value=str(sale_30d),          inline=True)
+    embed.add_field(name="Trend",         value=trend_str,              inline=True)
+
+    # GIGA Score — single number + label, no breakdown
     embed.add_field(
-        name="Hard rules",
-        value="\n".join(rule_lines),
+        name="GIGA Score",
+        value=f"**{score} / 100** — {score_label}",
         inline=False,
     )
 
-    embed.set_footer(text="GIGA platform · Prices from 30-day median sales · Not financial advice")
+    embed.set_footer(text="GIGA · Not financial advice")
     await interaction.followup.send(embed=embed)
 
 
