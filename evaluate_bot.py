@@ -563,7 +563,7 @@ async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
         # Join cards -> card_sets for fast indexed lookup
         query = (
             supabase.table("cards")
-            .select("player_name, canonical_name, card_sets(name, release_year)")
+            .select("player_name, canonical_name, card_sets(name, year)")
         )
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
