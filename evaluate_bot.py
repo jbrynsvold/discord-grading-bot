@@ -243,15 +243,6 @@ async def on_ready():
 # /evaluate
 # ===========================================================================
 
-EVALUATE_SELECT = (
-    "player_name, set_name, set_year, sport, card_number, variation, "
-    "insert_set, canonical_name, is_rookie, card_id, grade, "
-    "current_price, avg_price_3d, avg_price_30d, avg_price_90d, "
-    "avg_price_30_90d, sale_count_3d, sale_count_30d, sale_count_90d, "
-    "pct_of_52w_range, high_52w, low_52w, has_90d_data, "
-    "days_since_last_sale, last_sale_date"
-)
-
 @tree.command(name="evaluate", description="Should you buy, hold, or pass on this card? GIGA scores it against our full criteria.")
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
@@ -270,39 +261,15 @@ async def evaluate(
 ):
     await interaction.response.defer(ephemeral=True)
 
-    # --- Card lookup (same 3-pass fallback as grade bot) ---
+    # --- Card lookup via RPC (uses indexed sports/tcg schemas) ---
     try:
-        def base_query(player_field="player_name"):
-            q = (
-                supabase.table("mv_card_metrics")
-                .select(EVALUATE_SELECT)
-                .ilike(player_field, f"%{player}%")
-                .ilike("set_name", f"%{set_name}%")
-                .ilike("grade", f"%{grade}%")
-            )
-            q = q.ilike("variation", f"%{variation}%")
-            if card_number:
-                q = q.ilike("card_number", f"%{card_number}%")
-            return q
-
-        result = base_query().limit(3).execute()
-
-        # Pass 2: relax grade but keep variation filter
-        if not result.data:
-            q2 = (
-                supabase.table("mv_card_metrics")
-                .select(EVALUATE_SELECT)
-                .ilike("player_name", f"%{player}%")
-                .ilike("set_name", f"%{set_name}%")
-                .ilike("variation", f"%{variation}%")
-            )
-            if card_number:
-                q2 = q2.ilike("card_number", f"%{card_number}%")
-            result = q2.limit(3).execute()
-
-        # Pass 3: canonical_name fallback
-        if not result.data:
-            result = base_query("canonical_name").limit(3).execute()
+        result = supabase.rpc("evaluate_card", {
+            "p_player":      player,
+            "p_set":         set_name,
+            "p_grade":       grade,
+            "p_variation":   variation or "",
+            "p_card_number": card_number or "",
+        }).execute()
 
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Database error: {e}")
@@ -336,20 +303,12 @@ async def evaluate(
     # --- Watchlist check (watching status only) ---
     watchlist_entry = None
     try:
-        for schema in ("tcg", "sports"):
-            r = (
-                supabase.table(f"{schema}.candidate_watchlist")
-                .select("flagged_date, status, predicted_catalyst, call_type, call_horizon_days")
-                .eq("card_id", card_id)
-                .ilike("grade", f"%{card_grade}%")
-                .eq("status", "watching")
-                .order("flagged_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if r.data:
-                watchlist_entry = r.data[0]
-                break
+        r = supabase.rpc("get_watchlist_entry", {
+            "p_card_id": card_id,
+            "p_grade": card_grade,
+        }).execute()
+        if r.data:
+            watchlist_entry = r.data[0]
     except Exception:
         pass  # watchlist check is best-effort
 
@@ -357,24 +316,17 @@ async def evaluate(
     already_spiked = False
     spike_info = None
     try:
-        r = (
-            supabase.table("spike_library")
-            .select("spike_start_date, peak_spike_price, price_change_pct, resolution")
-            .eq("card_id", card_id)
-            .ilike("grade", f"%{card_grade}%")
-            .order("spike_start_date", desc=True)
-            .limit(1)
-            .execute()
-        )
+        r = supabase.rpc("get_spike_entry", {
+            "p_card_id": card_id,
+            "p_grade": card_grade,
+        }).execute()
         if r.data:
             s = r.data[0]
-            # Only flag as "already spiked" if the spike is recent (within 60 days)
-            # and not resolved/faded
             spike_date = s.get("spike_start_date")
             resolution = s.get("resolution", "")
             if spike_date:
                 from datetime import datetime
-                days_ago = (date.today() - datetime.strptime(spike_date, "%Y-%m-%d").date()).days
+                days_ago = (date.today() - datetime.strptime(str(spike_date), "%Y-%m-%d").date()).days
                 if days_ago <= 60 and resolution not in ("faded", "resolved"):
                     already_spiked = True
                     spike_info = s
