@@ -533,43 +533,22 @@ async def eval_player_autocomplete(interaction: discord.Interaction, current: st
 @evaluate.autocomplete("set_name")
 async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player
-        # Join cards -> card_sets for fast indexed lookup
-        query = (
-            supabase.table("cards")
-            .select("player_name, canonical_name, card_sets(name, year)")
-        )
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("card_sets.name", f"%{current}%")
-        result = query.limit(100).execute()
+        player_val = interaction.namespace.player or ""
+        result = supabase.rpc(
+            "search_set_names",
+            {"p_player": player_val, "p_search": current or "", "p_limit": 25}
+        ).execute()
 
-        from collections import Counter
-        rows_by_set = {}
-        set_count = Counter()
-        for row in result.data:
-            cs = row.get("card_sets") or {}
-            set_name = cs.get("name")
-            year = cs.get("release_year", "?")
-            if not set_name:
-                continue
-            set_count[set_name] += 1
-            if set_name not in rows_by_set:
-                rows_by_set[set_name] = year
-
-        seen = set()
         choices = []
-        for set_name, year in rows_by_set.items():
-            if set_name in seen:
+        for row in (result.data or []):
+            name = row.get("set_name", "")
+            year = row.get("set_year", "?")
+            if not name:
                 continue
-            seen.add(set_name)
-            label = f"{set_name} ({year})"
+            label = f"{name} ({year})"
             if len(label) > 100:
                 label = label[:97] + "..."
-            choices.append(app_commands.Choice(name=label, value=set_name))
-            if len(choices) >= 25:
-                break
+            choices.append(app_commands.Choice(name=label, value=name))
         return choices
     except Exception as e:
         print(f"[ERROR] eval_set_autocomplete: {e}")
@@ -578,46 +557,32 @@ async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
 
 @evaluate.autocomplete("grade")
 async def eval_grade_autocomplete(interaction: discord.Interaction, current: str):
-    """Autocomplete grade options — only hits mv_card_metrics once player+set known."""
     try:
-        player_val = interaction.namespace.player
-        set_val    = interaction.namespace.set_name
-        # By the time grade is being typed we have player+set — safe to hit mv_card_metrics
-        # with specific filters so it uses the index properly
-        query = (
-            supabase.table("mv_card_metrics")
-            .select("grade, current_price")
-        )
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if set_val and len(set_val) >= 2:
-            query = query.ilike("set_name", f"%{set_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("grade", f"%{current}%")
-        result = query.limit(100).execute()
+        player_val = interaction.namespace.player or ""
+        set_val    = interaction.namespace.set_name or ""
+        result = supabase.rpc(
+            "search_grades",
+            {"p_player": player_val, "p_set": set_val, "p_search": current or "", "p_limit": 25}
+        ).execute()
 
-        # Sort grades in a logical order
         grade_order = ["Raw", "PSA 9", "PSA 10", "BGS 9", "BGS 9.5", "BGS 10",
                        "SGC 9", "SGC 9.5", "SGC 10", "CGC 9", "CGC 9.5", "CGC 10"]
 
         seen = {}
-        for row in result.data:
-            g = row.get("grade", "").strip()
+        for row in (result.data or []):
+            g = (row.get("grade") or "").strip()
             if not g or g in seen:
                 continue
-            seen[g] = fv(row.get("current_price"))
+            seen[g] = row.get("current_price")
 
-        # Sort by known order, then alphabetically for unknowns
         def sort_key(g):
-            try:
-                return grade_order.index(g)
-            except ValueError:
-                return len(grade_order)
+            try: return grade_order.index(g)
+            except ValueError: return len(grade_order)
 
         choices = []
         for g in sorted(seen.keys(), key=sort_key):
             price = seen[g]
-            price_str = f" — ${price:.0f}" if price else ""
+            price_str = f" — ${float(price):.0f}" if price else ""
             label = f"{g}{price_str}"
             choices.append(app_commands.Choice(name=label, value=g))
             if len(choices) >= 25:
@@ -631,31 +596,20 @@ async def eval_grade_autocomplete(interaction: discord.Interaction, current: str
 @evaluate.autocomplete("variation")
 async def eval_variation_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player
-        set_val    = interaction.namespace.set_name
-        # player+set already known here — filtered query hits index
-        query = (
-            supabase.table("mv_card_metrics")
-            .select("variation, current_price")
-            .not_.is_("variation", "null")
-        )
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if set_val and len(set_val) >= 2:
-            query = query.ilike("set_name", f"%{set_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("variation", f"%{current}%")
-        result = query.limit(100).execute()
+        player_val = interaction.namespace.player or ""
+        set_val    = interaction.namespace.set_name or ""
+        result = supabase.rpc(
+            "search_variations",
+            {"p_player": player_val, "p_set": set_val, "p_search": current or "", "p_limit": 25}
+        ).execute()
 
-        seen = set()
         choices = []
-        for row in result.data:
+        for row in (result.data or []):
             val = (row.get("variation") or "").strip()
-            if not val or val in seen:
+            if not val:
                 continue
-            seen.add(val)
-            price = fv(row.get("current_price"))
-            price_str = f" — ${price:.0f}" if price else ""
+            price = row.get("current_price")
+            price_str = f" — ${float(price):.0f}" if price else ""
             label = f"{val}{price_str}"
             if len(label) > 100:
                 label = label[:97] + "..."
