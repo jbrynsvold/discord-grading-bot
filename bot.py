@@ -200,18 +200,46 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
     await interaction.followup.send(embed=embed)
 
 # ===========================================================================
-# /grade — with autocomplete on player, set_name, variation, and insert_set
+# /grade — with improved autocomplete and search
 # ===========================================================================
 
-# Shared select columns
 GRADE_SELECT = (
-    "player_name, set_name, set_year, card_number, variation, insert_set, is_rookie, sport, "
+    "player_name, set_name, set_year, card_number, variation, insert_set, canonical_name, is_rookie, sport, "
     "raw_price, psa9_price, psa10_price, grading_score, "
     "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
     "bgs9_price, bgs95_price, bgs10_price, "
     "sgc9_price, sgc95_price, sgc10_price, "
     "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price"
 )
+
+def build_grade_query(player: str, set_name: str, variation: str, insert_set: str, card_number: str):
+    """
+    Build the main grade query. Returns a supabase query object.
+    Searches player_name first; if that yields nothing the caller should
+    fall back to canonical_name (see the /grade handler below).
+    """
+    q = (
+        supabase.table("mv_grade_premiums")
+        .select(GRADE_SELECT)
+        .ilike("player_name", f"%{player}%")
+        .ilike("set_name", f"%{set_name}%")
+    )
+    if variation:
+        # FIX: was exact match — now wildcard so "Blue" matches "Blue Refractor"
+        q = q.ilike("variation", f"%{variation.strip()}%")
+    else:
+        q = q.is_("variation", "null")
+
+    if insert_set:
+        q = q.ilike("insert_set", f"%{insert_set}%")
+    else:
+        q = q.is_("insert_set", "null")
+
+    if card_number:
+        q = q.ilike("card_number", f"%{card_number}%")
+
+    return q
+
 
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
@@ -240,40 +268,36 @@ async def grade(
     await interaction.response.defer(ephemeral=True)
 
     try:
-        query = supabase.table("mv_grade_premiums") \
-            .select(GRADE_SELECT) \
-            .ilike("player_name", f"%{player}%") \
-            .ilike("set_name", f"%{set_name}%")
+        # --- Pass 1: strict match (base cards only unless variation/insert_set specified) ---
+        result = build_grade_query(player, set_name, variation, insert_set, card_number).limit(5).execute()
 
-        if variation:
-            query = query.ilike("variation", variation.strip())
-        else:
-            query = query.is_("variation", "null")
-
-        # If insert_set specified, filter to it. Otherwise exclude inserts (base only).
-        if insert_set:
-            query = query.ilike("insert_set", f"%{insert_set}%")
-        else:
-            query = query.is_("insert_set", "null")
-
-        if card_number:
-            query = query.ilike("card_number", f"%{card_number}%")
-
-        result = query.limit(1).execute()
-
-        # Fallback: relax insert_set filter if no match
+        # --- Pass 2: relax insert_set/variation filters if nothing found ---
         if not result.data:
-            query2 = supabase.table("mv_grade_premiums") \
-                .select(GRADE_SELECT) \
-                .ilike("player_name", f"%{player}%") \
+            q2 = (
+                supabase.table("mv_grade_premiums")
+                .select(GRADE_SELECT)
+                .ilike("player_name", f"%{player}%")
                 .ilike("set_name", f"%{set_name}%")
+            )
             if variation:
-                query2 = query2.ilike("variation", variation.strip())
+                q2 = q2.ilike("variation", f"%{variation.strip()}%")
             if insert_set:
-                query2 = query2.ilike("insert_set", f"%{insert_set}%")
+                q2 = q2.ilike("insert_set", f"%{insert_set}%")
             if card_number:
-                query2 = query2.ilike("card_number", f"%{card_number}%")
-            result = query2.limit(1).execute()
+                q2 = q2.ilike("card_number", f"%{card_number}%")
+            result = q2.limit(5).execute()
+
+        # --- Pass 3: fall back to canonical_name search (catches EX/GX/VMAX mismatches) ---
+        if not result.data:
+            q3 = (
+                supabase.table("mv_grade_premiums")
+                .select(GRADE_SELECT)
+                .ilike("canonical_name", f"%{player}%")
+                .ilike("set_name", f"%{set_name}%")
+            )
+            if card_number:
+                q3 = q3.ilike("card_number", f"%{card_number}%")
+            result = q3.limit(5).execute()
 
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Database query failed: {e}")
@@ -282,10 +306,38 @@ async def grade(
     if not result.data:
         await interaction.followup.send(
             f"No card found for **{player}** in **{set_name}**.\n"
-            f"Try adjusting the name or set — partial matches work. Use card number to narrow results if needed."
+            f"Try adjusting the name or set — partial matches work. "
+            f"If searching for a card like 'Gengar EX', try just the base name (e.g. 'Gengar') and use card number to narrow it down."
         )
         return
 
+    # --- Disambiguation: if multiple cards match, show a pick list ---
+    if len(result.data) > 1:
+        lines = []
+        for i, c in enumerate(result.data, 1):
+            price_str = f"Raw ${c['raw_price']:.0f}" if c.get("raw_price") else "No raw price"
+            psa10_str = f" · PSA 10 ${c['psa10_price']:.0f}" if c.get("psa10_price") else ""
+            variation_str = f" · {c['variation']}" if c.get("variation") else ""
+            insert_str = f" · {c['insert_set']}" if c.get("insert_set") else ""
+            num_str = f" #{c['card_number']}" if c.get("card_number") else ""
+            lines.append(
+                f"**{i}.** {c['set_name']}{num_str}{variation_str}{insert_str}\n"
+                f"    {price_str}{psa10_str}"
+            )
+        embed = discord.Embed(
+            title=f"🔎 Multiple matches for '{player}'",
+            description=(
+                "Found more than one card. Re-run `/grade` with a more specific set name, "
+                "variation, or card number to narrow it down.\n\n"
+                + "\n\n".join(lines)
+            ),
+            color=0x5865F2,
+        )
+        embed.set_footer(text="Tip: add the card number (e.g. card_number:114) to jump straight to the right card.")
+        await interaction.followup.send(embed=embed)
+        return
+
+    # --- Single match: full analysis ---
     card = result.data[0]
     raw    = fv(card.get("raw_price"))
     psa9   = fv(card.get("psa9_price"))
@@ -307,7 +359,7 @@ async def grade(
     p9p10_mult = fv(card.get("psa9_to_psa10_mult"))
 
     rec_grader = get_grader_rec(raw, psa9, psa10, gs, vintage)
-    grading_cost_default = GRADERS[rec_grader]["default_cost"]
+    grading_cost_default = GRADERS["PSA"]["default_cost"]  # always PSA $27.99 as baseline
     grade_it, grade_reason, hard_to_grade = should_grade(raw, psa9, psa10, grading_cost_default, gs, psa9_mult)
 
     color = 0x57F287 if grade_it else (0xED4245 if grade_it is False else 0x5865F2)
@@ -427,19 +479,51 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 2:
         return []
     try:
-        result = supabase.table("mv_grade_premiums") \
-            .select("player_name, sport") \
-            .ilike("player_name", f"%{current}%") \
-            .limit(50).execute()
+        # Pass 1: match on player_name
+        result = (
+            supabase.table("mv_grade_premiums")
+            .select("player_name, sport, raw_price")
+            .ilike("player_name", f"%{current}%")
+            .order("raw_sale_count_30d", desc=True)
+            .limit(100)
+            .execute()
+        )
+
+        # Pass 2: if sparse results, also search canonical_name
+        # (catches EX/GX/VMAX/etc. suffix mismatches like "Gengar EX" stored as "Gengar")
+        canonical_names = set()
+        if len(result.data) < 5:
+            result2 = (
+                supabase.table("mv_grade_premiums")
+                .select("player_name, sport, raw_price, canonical_name")
+                .ilike("canonical_name", f"%{current}%")
+                .order("raw_sale_count_30d", desc=True)
+                .limit(50)
+                .execute()
+            )
+            # Track which player_names came from canonical search so we can label them
+            for row in result2.data:
+                if row["player_name"] not in {r["player_name"] for r in result.data}:
+                    canonical_names.add(row["player_name"])
+            result.data = result.data + result2.data
+
         seen = set()
         choices = []
         for row in result.data:
             name = row["player_name"]
-            if name not in seen:
-                seen.add(name)
-                sport = row.get("sport", "")
-                label = f"{name} ({sport})" if sport and len(name) + len(sport) < 95 else name
-                choices.append(app_commands.Choice(name=label, value=name))
+            if name in seen:
+                continue
+            seen.add(name)
+            sport = row.get("sport", "")
+            raw = row.get("raw_price")
+            price_str = f" · ${raw:.0f} raw" if raw else ""
+            # Flag entries found via canonical search so user knows it's a close match
+            fuzzy_tag = " ~" if name in canonical_names else ""
+            label = f"{name} ({sport}){price_str}{fuzzy_tag}"
+            # Discord choice names max 100 chars
+            if len(label) > 100:
+                label = label[:97] + "..."
+            choices.append(app_commands.Choice(name=label, value=name))
             if len(choices) >= 25:
                 break
         return choices
@@ -447,24 +531,35 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
         print(f"[ERROR] player_autocomplete: {e}")
         return []
 
+
 @grade.autocomplete("set_name")
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
-        query = supabase.table("mv_grade_premiums").select("set_name, set_year")
+        # FIX: include raw_price in select so we can show it in the label
+        query = supabase.table("mv_grade_premiums").select("set_name, set_year, raw_price")
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if current and len(current) >= 1:
             query = query.ilike("set_name", f"%{current}%")
+        # Order by most-traded so relevant sets surface first
+        query = query.order("raw_sale_count_30d", desc=True)
         result = query.limit(100).execute()
+
         seen = set()
         choices = []
         for row in result.data:
-            label = f"{row['set_name']} ({row['set_year']})"
-            val   = row["set_name"]
-            if val not in seen:
-                seen.add(val)
-                choices.append(app_commands.Choice(name=label, value=val))
+            val = row["set_name"]
+            if val in seen:
+                continue
+            seen.add(val)
+            raw = row.get("raw_price")
+            # FIX: include raw price in label so users can eyeball the right card
+            price_str = f" — ${raw:.0f} raw" if raw else ""
+            label = f"{val} ({row['set_year']}){price_str}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            choices.append(app_commands.Choice(name=label, value=val))
             if len(choices) >= 25:
                 break
         return choices
@@ -472,21 +567,26 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
         print(f"[ERROR] set_autocomplete: {e}")
         return []
 
+
 @grade.autocomplete("variation")
 async def variation_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
         set_val    = interaction.namespace.set_name
-        query = supabase.table("mv_grade_premiums") \
-            .select("variation") \
+        query = (
+            supabase.table("mv_grade_premiums")
+            .select("variation, raw_price, psa10_price")
             .not_.is_("variation", "null")
+        )
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if set_val and len(set_val) >= 2:
             query = query.ilike("set_name", f"%{set_val}%")
         if current and len(current) >= 1:
             query = query.ilike("variation", f"%{current}%")
+        query = query.order("raw_sale_count_30d", desc=True)
         result = query.limit(100).execute()
+
         seen = set()
         choices = []
         for row in result.data:
@@ -494,7 +594,15 @@ async def variation_autocomplete(interaction: discord.Interaction, current: str)
             if not val or val in seen:
                 continue
             seen.add(val)
-            choices.append(app_commands.Choice(name=val, value=val))
+            # Show price alongside variation so users can tell parallels apart
+            raw = row.get("raw_price")
+            psa10 = row.get("psa10_price")
+            price_str = f" — ${raw:.0f} raw" if raw else ""
+            psa10_str = f" · ${psa10:.0f} PSA 10" if psa10 else ""
+            label = f"{val}{price_str}{psa10_str}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            choices.append(app_commands.Choice(name=label, value=val))
             if len(choices) >= 25:
                 break
         return choices
@@ -502,21 +610,26 @@ async def variation_autocomplete(interaction: discord.Interaction, current: str)
         print(f"[ERROR] variation_autocomplete: {e}")
         return []
 
+
 @grade.autocomplete("insert_set")
 async def insert_set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player
         set_val    = interaction.namespace.set_name
-        query = supabase.table("mv_grade_premiums") \
-            .select("insert_set") \
+        query = (
+            supabase.table("mv_grade_premiums")
+            .select("insert_set")
             .not_.is_("insert_set", "null")
+        )
         if player_val and len(player_val) >= 2:
             query = query.ilike("player_name", f"%{player_val}%")
         if set_val and len(set_val) >= 2:
             query = query.ilike("set_name", f"%{set_val}%")
         if current and len(current) >= 1:
             query = query.ilike("insert_set", f"%{current}%")
+        query = query.order("raw_sale_count_30d", desc=True)
         result = query.limit(100).execute()
+
         seen = set()
         choices = []
         for row in result.data:
