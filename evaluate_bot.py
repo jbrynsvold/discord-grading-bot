@@ -152,8 +152,9 @@ tree = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
-    await tree.sync()
-    print(f"[OK] CardBot is online as {client.user}")
+    synced = await tree.sync()
+    print(f"[OK] EvaluateBot is online as {client.user}")
+    print(f"[OK] Synced {len(synced)} commands: {[c.name for c in synced]}")
 
 # ===========================================================================
 # /sell
