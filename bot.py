@@ -3,34 +3,30 @@ import discord
 from discord import app_commands
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from collections import Counter
 
 load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN        = os.getenv("DISCORD_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ===========================================================================
-# SHARED HELPERS
+# HELPERS
 # ===========================================================================
 
 def format_currency(amount) -> str:
     if amount is None:
         return "N/A"
     amount = float(amount)
-    if amount >= 0:
-        return f"${amount:,.2f}"
-    return f"-${abs(amount):,.2f}"
+    return f"${amount:,.2f}" if amount >= 0 else f"-${abs(amount):,.2f}"
 
 def fv(val):
-    """Safe float conversion — returns None if null."""
     return float(val) if val is not None else None
 
-TCG_CATEGORIES = {"Pokemon", "Yu-Gi-Oh", "Other TCG", "Non-Sport Vintage"}
-
 # ===========================================================================
-# SELL COMMAND DATA
+# SELL DATA
 # ===========================================================================
 
 PLATFORMS = {
@@ -45,7 +41,7 @@ PLATFORMS = {
     "iconic":          {"name": "Iconic Auctions",     "fee_pct": 0.15,   "fixed_fee": 0.00, "note": "Boutique auction house for premium cards.",             "emoji": "💎"},
 }
 
-def get_tier(sale_price: float) -> dict:
+def get_tier(sale_price):
     if sale_price < 100:
         return {"tier": "Budget",  "platforms": ["ebay", "whatnot", "facebook"],                                   "recommended": "ebay",         "advice": "eBay gives the widest buyer pool. Facebook Groups work well if you have BST rep — no fees."}
     elif sale_price < 500:
@@ -61,7 +57,7 @@ def calc_net(sale_price, fee_pct, fixed_fee, purchase_price, grading_cost):
     return sale_price - (sale_price * fee_pct + fixed_fee) - purchase_price - grading_cost
 
 # ===========================================================================
-# GRADE COMMAND DATA
+# GRADE DATA
 # ===========================================================================
 
 GRADERS = {
@@ -75,31 +71,25 @@ GRADERS = {
             "Express":       (160.00, "~10 business days", 2999,  "Fast turnaround"),
             "Super Express": (300.00, "~5 business days",  4999,  "Highest priority"),
         },
-        "notes": "Highest resale premiums. Best liquidity for most sports cards.",
         "emoji": "🟦",
-        "membership_note": "PSA Collectors Club ($149/yr) unlocks Value Bulk at ~$21.99/card (20+ cards)",
     },
     "BGS": {
         "default_tier": "Base", "default_cost": 14.95,
         "tiers": {
-            "Base":     (14.95,  "~75 days", None, "No membership needed. Sub-grades included free."),
+            "Base":     (14.95,  "~75 days", None, "Sub-grades included free."),
             "Standard": (34.95,  "~45 days", None, "Best balance of cost and speed"),
             "Express":  (79.95,  "~15 days", None, "Fast turnaround"),
             "Priority": (124.95, "~5 days",  None, "Fastest BGS service"),
         },
-        "notes": "Sub-grades free on every card. Best for modern chrome/autos. Black Label (quad 10s) commands huge premiums.",
         "emoji": "⚫",
-        "membership_note": "No annual membership required.",
     },
     "SGC": {
         "default_tier": "Standard", "default_cost": 15.00,
         "tiers": {
-            "Standard":  (15.00, "~15-20 business days", 1500, "Best value for speed. No upcharges on modern cards."),
+            "Standard":  (15.00, "~15-20 business days", 1500, "Best value for speed."),
             "Immediate": (40.00, "~1-2 business days",   1500, "Fastest turnaround in the industry"),
         },
-        "notes": "Fast turnaround. Great for vintage and budget submissions. Free auto grade on cards that receive a 10.",
         "emoji": "🟤",
-        "membership_note": "No membership required.",
     },
     "CGC": {
         "default_tier": "Economy", "default_cost": 17.00,
@@ -109,9 +99,7 @@ GRADERS = {
             "Express":     (50.00,  "~10 days", 3000,  "Fast and mid-range"),
             "WalkThrough": (150.00, "~2 days",  10000, "Fastest CGC service"),
         },
-        "notes": "Competitive pricing. Strong for TCG (Pokemon, MTG). Free account; paid members save 10-20%.",
         "emoji": "🟡",
-        "membership_note": "Free account available. Associate/Premium: 10% off. Elite: 20% off. Starts at $25/yr.",
     },
 }
 
@@ -129,27 +117,25 @@ def should_grade(raw, psa9, psa10, grading_cost, grading_score, psa9_mult):
     psa10_mult_actual = (psa10 / total_cost) if (psa10 and total_cost > 0) else 0
     uplift = psa9 - raw - grading_cost
     hard_to_grade = psa9_mult and psa9_mult >= 5.0
-    warning = ""
-    if hard_to_grade:
-        warning = f"\n⚠️ PSA 9 is {psa9_mult:.1f}x raw — this card is historically difficult to grade. High risk of low grade or rejection. Verify condition carefully before submitting."
+    warning = f"\n⚠️ PSA 9 is {psa9_mult:.1f}x raw — historically difficult to grade. High risk of low grade." if hard_to_grade else ""
     if psa10_mult_actual >= 2.5:
-        return True, f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}", hard_to_grade
+        return True,  f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}", hard_to_grade
     if uplift < 0:
         return False, f"PSA 9 nets you {format_currency(uplift)} after grading cost. Sell raw.{warning}", hard_to_grade
     if uplift < 30:
         if grading_score >= 50:
-            return True, f"Marginal uplift ({format_currency(uplift)}) but grading score of {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}", hard_to_grade
+            return True,  f"Marginal uplift ({format_currency(uplift)}) but grading score {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}", hard_to_grade
         else:
-            return False, f"Upside of only {format_currency(uplift)} and grading score of {grading_score:.0f}/100 is below average. Sell raw.{warning}", hard_to_grade
+            return False, f"Upside of only {format_currency(uplift)} and grading score {grading_score:.0f}/100 is below average. Sell raw.{warning}", hard_to_grade
     return True, f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the ${grading_cost:.2f} grading cost.{warning}", hard_to_grade
 
 # ===========================================================================
-# Bot setup
+# BOT SETUP
 # ===========================================================================
 
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+client  = discord.Client(intents=intents)
+tree    = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
@@ -179,7 +165,7 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
     embed = discord.Embed(title=f"💰 Sell Analysis — ${sale_price:,.2f}", color=color_map.get(tier_data["tier"], 0x5865F2))
     parts = [f"**Sale Price:** ${sale_price:,.2f}"]
     if purchase_price > 0: parts.append(f"**Paid:** ${purchase_price:,.2f}")
-    if grading_cost > 0: parts.append(f"**Grading:** ${grading_cost:,.2f}")
+    if grading_cost > 0:   parts.append(f"**Grading:** ${grading_cost:,.2f}")
     embed.description = "  ·  ".join(parts)
     lines = []
     for key in tier_data["platforms"]:
@@ -200,56 +186,73 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
     await interaction.followup.send(embed=embed)
 
 # ===========================================================================
-# /grade — with improved autocomplete and search
+# /grade
 # ===========================================================================
 
 GRADE_SELECT = (
-    "player_name, set_name, set_year, card_number, variation, insert_set, canonical_name, is_rookie, sport, "
-    "raw_price, psa9_price, psa10_price, grading_score, "
+    "card_id, player_name, card_number, set_name, variation, insert_set, "
+    "canonical_name, is_rookie, sport, "
+    "raw_price, raw_sale_count_30d, "
+    "psa9_price, psa10_price, grading_score, "
     "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
     "bgs9_price, bgs95_price, bgs10_price, "
     "sgc9_price, sgc95_price, sgc10_price, "
     "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price"
 )
 
-def build_grade_query(player: str, set_name: str, variation: str, insert_set: str, card_number: str):
+
+def lookup_cards(player: str, set_name: str, variation: str, insert_set: str, card_number: str):
     """
-    Build the main grade query. Returns a supabase query object.
-    Searches player_name first; if that yields nothing the caller should
-    fall back to canonical_name (see the /grade handler below).
+    Single-pass lookup against mv_grade_premiums.
+    Pass 1: player_name match (strict on variation/insert/card_number if given).
+    Pass 2: relax variation/insert filters.
+    Pass 3: canonical_name fallback.
+    Returns list of matching rows.
     """
-    q = (
-        supabase.table("mv_grade_premiums")
-        .select(GRADE_SELECT)
-        .ilike("player_name", f"%{player}%")
-        .ilike("set_name", f"%{set_name}%")
-    )
-    if variation:
-        # FIX: was exact match — now wildcard so "Blue" matches "Blue Refractor"
-        q = q.ilike("variation", f"%{variation.strip()}%")
-    else:
-        q = q.is_("variation", "null")
+    def base_query(player_field: str, player_val: str):
+        return (
+            supabase.table("mv_grade_premiums")
+            .select(GRADE_SELECT)
+            .ilike(player_field, f"%{player_val}%")
+            .ilike("set_name", f"%{set_name}%")
+        )
 
-    if insert_set:
-        q = q.ilike("insert_set", f"%{insert_set}%")
-    else:
-        q = q.is_("insert_set", "null")
+    # Pass 1
+    q = base_query("player_name", player)
+    if variation:   q = q.ilike("variation",  f"%{variation.strip()}%")
+    else:           q = q.is_("variation",    "null")
+    if insert_set:  q = q.ilike("insert_set", f"%{insert_set}%")
+    else:           q = q.is_("insert_set",   "null")
+    if card_number: q = q.ilike("card_number", f"%{card_number}%")
+    result = q.order("raw_sale_count_30d", desc=True).limit(5).execute()
+    if result.data:
+        return result.data
 
-    if card_number:
-        q = q.ilike("card_number", f"%{card_number}%")
+    # Pass 2 — relax variation/insert
+    q = base_query("player_name", player)
+    if variation:   q = q.ilike("variation",  f"%{variation.strip()}%")
+    if insert_set:  q = q.ilike("insert_set", f"%{insert_set}%")
+    if card_number: q = q.ilike("card_number", f"%{card_number}%")
+    result = q.order("raw_sale_count_30d", desc=True).limit(5).execute()
+    if result.data:
+        return result.data
 
-    return q
+    # Pass 3 — canonical_name
+    q = base_query("canonical_name", player)
+    if card_number: q = q.ilike("card_number", f"%{card_number}%")
+    result = q.order("raw_sale_count_30d", desc=True).limit(5).execute()
+    return result.data or []
 
 
 @tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
-    player="Player or character name — start typing for suggestions",
-    set_name="Set name — start typing for filtered suggestions",
-    variation="Optional: parallel/variation (e.g. Blue Refractor, Gold Prizm) — leave blank for base",
-    insert_set="Optional: insert set name (e.g. Deep Space, Luck of the Lottery) — leave blank for non-inserts",
-    card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
+    player="Player or character name",
+    set_name="Set name",
+    card_number="Card number — required when multiple cards share the same variation (e.g. GG45, 114)",
+    variation="Optional: parallel/variation — leave blank for base",
+    insert_set="Optional: insert set name — leave blank for non-inserts",
     is_vintage="Is this a vintage card (pre-1980)?",
-    override_tier="Optional: use a faster tier (e.g. Express, Regular) for paid members",
+    override_tier="Optional: faster tier (e.g. Express, Regular) for paid members",
 )
 @app_commands.choices(is_vintage=[
     app_commands.Choice(name="No (Modern)", value=0),
@@ -259,86 +262,61 @@ async def grade(
     interaction: discord.Interaction,
     player: str,
     set_name: str,
+    card_number: str = None,
     variation: str = None,
     insert_set: str = None,
-    card_number: str = None,
     is_vintage: int = 0,
     override_tier: str = None,
 ):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        # --- Pass 1: strict match (base cards only unless variation/insert_set specified) ---
-        result = build_grade_query(player, set_name, variation, insert_set, card_number).limit(5).execute()
-
-        # --- Pass 2: relax insert_set/variation filters if nothing found ---
-        if not result.data:
-            q2 = (
-                supabase.table("mv_grade_premiums")
-                .select(GRADE_SELECT)
-                .ilike("player_name", f"%{player}%")
-                .ilike("set_name", f"%{set_name}%")
-            )
-            if variation:
-                q2 = q2.ilike("variation", f"%{variation.strip()}%")
-            if insert_set:
-                q2 = q2.ilike("insert_set", f"%{insert_set}%")
-            if card_number:
-                q2 = q2.ilike("card_number", f"%{card_number}%")
-            result = q2.limit(5).execute()
-
-        # --- Pass 3: fall back to canonical_name search (catches EX/GX/VMAX mismatches) ---
-        if not result.data:
-            q3 = (
-                supabase.table("mv_grade_premiums")
-                .select(GRADE_SELECT)
-                .ilike("canonical_name", f"%{player}%")
-                .ilike("set_name", f"%{set_name}%")
-            )
-            if card_number:
-                q3 = q3.ilike("card_number", f"%{card_number}%")
-            result = q3.limit(5).execute()
-
+        rows = lookup_cards(player, set_name, variation, insert_set, card_number)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Database query failed: {e}")
         return
 
-    if not result.data:
+    if not rows:
         await interaction.followup.send(
             f"No card found for **{player}** in **{set_name}**.\n"
-            f"Try adjusting the name or set — partial matches work. "
-            f"If searching for a card like 'Gengar EX', try just the base name (e.g. 'Gengar') and use card number to narrow it down."
+            "Try a partial name — partial matches work. For cards like 'Gengar EX', "
+            "try just 'Gengar' and use card_number to narrow it down."
         )
         return
 
-    # --- Disambiguation: if multiple cards match, show a pick list ---
-    if len(result.data) > 1:
+    # -----------------------------------------------------------------------
+    # DISAMBIGUATION — require card_number when multiple match
+    # -----------------------------------------------------------------------
+    if len(rows) > 1:
         lines = []
-        for i, c in enumerate(result.data, 1):
-            price_str = f"Raw ${c['raw_price']:.0f}" if c.get("raw_price") else "No raw price"
-            psa10_str = f" · PSA 10 ${c['psa10_price']:.0f}" if c.get("psa10_price") else ""
-            variation_str = f" · {c['variation']}" if c.get("variation") else ""
-            insert_str = f" · {c['insert_set']}" if c.get("insert_set") else ""
-            num_str = f" #{c['card_number']}" if c.get("card_number") else ""
-            lines.append(
-                f"**{i}.** {c['set_name']}{num_str}{variation_str}{insert_str}\n"
-                f"    {price_str}{psa10_str}"
-            )
+        for c in rows:
+            num       = c.get("card_number", "?")
+            var       = c.get("variation") or "Base"
+            ins       = f" · {c['insert_set']}" if c.get("insert_set") else ""
+            raw       = fv(c.get("raw_price"))
+            psa10     = fv(c.get("psa10_price"))
+            price_str = f"Raw {format_currency(raw)}" if raw else "No raw price"
+            psa10_str = f" · PSA 10 {format_currency(psa10)}" if psa10 else ""
+            canon     = c.get("canonical_name", "")
+            lines.append(f"• **#{num}** {var}{ins}  {price_str}{psa10_str}\n  _{canon}_")
+
         embed = discord.Embed(
-            title=f"🔎 Multiple matches for '{player}'",
+            title="🔎 Multiple matches — add a card number",
             description=(
-                "Found more than one card. Re-run `/grade` with a more specific set name, "
-                "variation, or card number to narrow it down.\n\n"
-                + "\n\n".join(lines)
+                f"Found **{len(rows)} cards** matching **{player}** in **{set_name}**.\n"
+                "Re-run `/grade` and fill in the **card_number** field:\n\n"
+                + "\n".join(lines)
             ),
             color=0x5865F2,
         )
-        embed.set_footer(text="Tip: add the card number (e.g. card_number:114) to jump straight to the right card.")
+        embed.set_footer(text="Copy the # from the list above into the card_number field.")
         await interaction.followup.send(embed=embed)
         return
 
-    # --- Single match: full analysis ---
-    card = result.data[0]
+    # -----------------------------------------------------------------------
+    # SINGLE MATCH — full analysis
+    # -----------------------------------------------------------------------
+    card = rows[0]
     raw    = fv(card.get("raw_price"))
     psa9   = fv(card.get("psa9_price"))
     psa10  = fv(card.get("psa10_price"))
@@ -359,7 +337,7 @@ async def grade(
     p9p10_mult = fv(card.get("psa9_to_psa10_mult"))
 
     rec_grader = get_grader_rec(raw, psa9, psa10, gs, vintage)
-    grading_cost_default = GRADERS["PSA"]["default_cost"]  # always PSA $27.99 as baseline
+    grading_cost_default = GRADERS["PSA"]["default_cost"]
     grade_it, grade_reason, hard_to_grade = should_grade(raw, psa9, psa10, grading_cost_default, gs, psa9_mult)
 
     color = 0x57F287 if grade_it else (0xED4245 if grade_it is False else 0x5865F2)
@@ -367,9 +345,9 @@ async def grade(
         title=f"🔎 Grade Analysis — {card['player_name']}",
         description=(
             f"{card['set_name']} #{card.get('card_number', '?')}"
-            + (f" · {card['variation']}" if card.get('variation') else "")
-            + (f" · 📋 {card['insert_set']}" if card.get('insert_set') else "")
-            + (" · 🌟 Rookie" if card.get('is_rookie') else "")
+            + (f" · {card['variation']}" if card.get("variation") else "")
+            + (f" · 📋 {card['insert_set']}" if card.get("insert_set") else "")
+            + (" · 🌟 Rookie" if card.get("is_rookie") else "")
         ),
         color=color,
     )
@@ -390,33 +368,28 @@ async def grade(
         else "🟡 Average — grade outcome uncertain" if gs >= 40
         else "🔴 Low — higher risk of poor grade"
     )
-    embed.add_field(name="📊 Grading Score", value=f"**{gs:.0f} / 100**\n{score_label}", inline=True)
+    embed.add_field(name="📊 Grading Score",    value=f"**{gs:.0f} / 100**\n{score_label}", inline=True)
     grade_display = "✅ **Yes**" if grade_it else ("❌ **No**" if grade_it is False else "⚠️ **Unclear**")
     embed.add_field(name="🎯 Should You Grade?", value=f"{grade_display}\n{grade_reason}", inline=True)
     embed.add_field(name="\u200b", value="\u200b", inline=False)
-
     embed.add_field(name="🏢 Grader Comparison", value="Cheapest no-membership tier shown. Use `override_tier` for faster options.", inline=False)
 
     for gk, gd in GRADERS.items():
         tier_name = override_tier if (override_tier and override_tier in gd["tiers"]) else gd["default_tier"]
-        cost, turnaround, max_val, _ = gd["tiers"][tier_name]
+        cost, turnaround, _, _ = gd["tiers"][tier_name]
         rec_tag = " ⭐" if gk == rec_grader else ""
 
         if gk == "PSA":
             uplift = (psa9 - raw - cost) if (psa9 and raw) else None
-            price_str = (
-                f"PSA 9: **{format_currency(psa9)}** · PSA 10: **{format_currency(psa10)}**\n"
-                f"Uplift (PSA 9 vs raw): **{format_currency(uplift)}**"
-            )
+            price_str = (f"PSA 9: **{format_currency(psa9)}** · PSA 10: **{format_currency(psa10)}**\n"
+                         f"Uplift (PSA 9 vs raw): **{format_currency(uplift)}**")
         elif gk == "BGS":
             if any([bgs9, bgs95, bgs10]):
                 best = bgs95 or bgs9 or bgs10
                 best_label = "BGS 9.5" if bgs95 else ("BGS 10" if bgs10 else "BGS 9")
                 uplift = (best - raw - cost) if (best and raw) else None
-                price_str = (
-                    f"BGS 9: **{format_currency(bgs9)}** · 9.5: **{format_currency(bgs95)}** · 10: **{format_currency(bgs10)}**\n"
-                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
-                )
+                price_str = (f"BGS 9: **{format_currency(bgs9)}** · 9.5: **{format_currency(bgs95)}** · 10: **{format_currency(bgs10)}**\n"
+                             f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**")
             else:
                 uplift = (psa9 - raw - cost) if (psa9 and raw) else None
                 price_str = f"_No BGS sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
@@ -425,10 +398,8 @@ async def grade(
                 best = sgc10 or sgc95 or sgc9
                 best_label = "SGC 10" if sgc10 else ("SGC 9.5" if sgc95 else "SGC 9")
                 uplift = (best - raw - cost) if (best and raw) else None
-                price_str = (
-                    f"SGC 9: **{format_currency(sgc9)}** · 9.5: **{format_currency(sgc95)}** · 10: **{format_currency(sgc10)}**\n"
-                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
-                )
+                price_str = (f"SGC 9: **{format_currency(sgc9)}** · 9.5: **{format_currency(sgc95)}** · 10: **{format_currency(sgc10)}**\n"
+                             f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**")
             else:
                 uplift = (psa9 - raw - cost) if (psa9 and raw) else None
                 price_str = f"_No SGC sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
@@ -438,10 +409,8 @@ async def grade(
                 best_label = "CGC 10 Pristine" if cgc10p else ("CGC 10" if cgc10 else ("CGC 9.5" if cgc95 else "CGC 9"))
                 uplift = (best - raw - cost) if (best and raw) else None
                 pristine_str = f" · Pristine: **{format_currency(cgc10p)}**" if cgc10p else ""
-                price_str = (
-                    f"CGC 9: **{format_currency(cgc9)}** · 9.5: **{format_currency(cgc95)}** · 10: **{format_currency(cgc10)}**{pristine_str}\n"
-                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
-                )
+                price_str = (f"CGC 9: **{format_currency(cgc9)}** · 9.5: **{format_currency(cgc95)}** · 10: **{format_currency(cgc10)}**{pristine_str}\n"
+                             f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**")
             else:
                 uplift = (psa9 - raw - cost) if (psa9 and raw) else None
                 price_str = f"_No CGC sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
@@ -462,16 +431,15 @@ async def grade(
         ),
         inline=False,
     )
-
     if not override_tier:
-        embed.add_field(name="💡 Tip", value="Re-run with `override_tier` set to e.g. `Express` or `Regular` to see costs for a faster tier.", inline=False)
+        embed.add_field(name="💡 Tip", value="Re-run with `override_tier` (e.g. `Express`) to see costs for faster tiers.", inline=False)
 
     embed.set_footer(text="Prices from DB (30-day median sales). Grading costs as of early 2026 — verify on grader websites before submitting.")
     await interaction.followup.send(embed=embed)
 
 
 # ===========================================================================
-# Autocomplete handlers
+# AUTOCOMPLETE — all against mv_grade_premiums with trigram indexes
 # ===========================================================================
 
 @grade.autocomplete("player")
@@ -479,48 +447,35 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 2:
         return []
     try:
-        # Pass 1: match on player_name
+        # Single query — match player_name OR canonical_name, dedupe by player_name
         result = (
             supabase.table("mv_grade_premiums")
-            .select("player_name, sport")
-            .ilike("player_name", f"%{current}%")
+            .select("player_name, sport, canonical_name, raw_sale_count_30d")
+            .or_(f"player_name.ilike.%{current}%,canonical_name.ilike.%{current}%")
             .order("raw_sale_count_30d", desc=True)
-            .limit(100)
+            .limit(60)
             .execute()
         )
 
-        # Pass 2: if sparse results, also search canonical_name
-        # (catches EX/GX/VMAX/etc. suffix mismatches like "Gengar EX" stored as "Gengar")
-        canonical_names = set()
-        if len(result.data) < 5:
-            result2 = (
-                supabase.table("mv_grade_premiums")
-                .select("player_name, sport, canonical_name")
-                .ilike("canonical_name", f"%{current}%")
-                .order("raw_sale_count_30d", desc=True)
-                .limit(50)
-                .execute()
-            )
-            # Track which player_names came from canonical search so we can label them
-            for row in result2.data:
-                if row["player_name"] not in {r["player_name"] for r in result.data}:
-                    canonical_names.add(row["player_name"])
-            result.data = result.data + result2.data
-
-        seen = set()
-        choices = []
-        for row in result.data:
+        seen = {}
+        for row in (result.data or []):
             name = row["player_name"]
             if name in seen:
                 continue
-            seen.add(name)
-            sport = row.get("sport", "")
-            # Flag entries found via canonical search so user knows it's a close match
-            fuzzy_tag = " ~" if name in canonical_names else ""
-            label = f"{name} ({sport}){fuzzy_tag}"
-            # Discord choice names max 100 chars
-            if len(label) > 100:
-                label = label[:97] + "..."
+            # Tag rows only found via canonical so user knows it's a close match
+            from_canonical = (
+                current.lower() not in name.lower() and
+                current.lower() in (row.get("canonical_name") or "").lower()
+            )
+            seen[name] = {"sport": row.get("sport", ""), "from_canonical": from_canonical,
+                          "count": row.get("raw_sale_count_30d") or 0}
+
+        sorted_names = sorted(seen, key=lambda n: (seen[n]["from_canonical"], -(seen[n]["count"])))
+        choices = []
+        for name in sorted_names:
+            info = seen[name]
+            tag  = " ~" if info["from_canonical"] else ""
+            label = f"{name} ({info['sport']}){tag}"[:100]
             choices.append(app_commands.Choice(name=label, value=name))
             if len(choices) >= 25:
                 break
@@ -533,40 +488,36 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
 @grade.autocomplete("set_name")
 async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player
-        query = supabase.table("mv_grade_premiums").select("set_name, set_year, raw_price")
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("set_name", f"%{current}%")
-        query = query.order("raw_sale_count_30d", desc=True)
-        result = query.limit(100).execute()
+        player_val = interaction.namespace.player or ""
 
-        # Count how many rows each set has for this player
-        # Only show price if exactly 1 card matches (unambiguous)
-        from collections import Counter
-        set_counts = Counter(row["set_name"] for row in result.data)
-        set_price = {}
-        for row in result.data:
-            s = row["set_name"]
+        # Single query — match player_name OR canonical_name for the set search
+        query = (
+            supabase.table("mv_grade_premiums")
+            .select("set_name, raw_price, raw_sale_count_30d")
+        )
+        if player_val and len(player_val) >= 2:
+            query = query.or_(f"player_name.ilike.%{player_val}%,canonical_name.ilike.%{player_val}%")
+        if current:
+            query = query.ilike("set_name", f"%{current}%")
+        result = query.order("raw_sale_count_30d", desc=True).limit(100).execute()
+
+        set_counts = Counter(r["set_name"] for r in (result.data or []))
+        set_price  = {}
+        for r in (result.data or []):
+            s = r["set_name"]
             if s not in set_price:
-                set_price[s] = (row.get("raw_price"), row.get("set_year"))
+                set_price[s] = r.get("raw_price")
 
         seen = set()
         choices = []
-        for row in result.data:
-            val = row["set_name"]
+        for r in (result.data or []):
+            val = r["set_name"]
             if val in seen:
                 continue
             seen.add(val)
-            year = set_price[val][1]
-            raw = set_price[val][0]
-            # Show price only when exactly 1 card in this set matches the player
+            raw = set_price[val]
             price_str = f" — ${float(raw):.0f} raw" if (raw and set_counts[val] == 1) else ""
-            label = f"{val} ({year}){price_str}"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            choices.append(app_commands.Choice(name=label, value=val))
+            choices.append(app_commands.Choice(name=f"{val}{price_str}"[:100], value=val))
             if len(choices) >= 25:
                 break
         return choices
@@ -578,41 +529,41 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
 @grade.autocomplete("variation")
 async def variation_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player
-        set_val    = interaction.namespace.set_name
+        player_val     = interaction.namespace.player or ""
+        set_val        = interaction.namespace.set_name or ""
+        card_number_val = interaction.namespace.card_number or ""
+
         query = (
             supabase.table("mv_grade_premiums")
-            .select("variation, raw_price, psa10_price")
+            .select("variation, raw_price, psa10_price, raw_sale_count_30d")
             .not_.is_("variation", "null")
         )
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if set_val and len(set_val) >= 2:
-            query = query.ilike("set_name", f"%{set_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("variation", f"%{current}%")
-        query = query.order("raw_sale_count_30d", desc=True)
-        result = query.limit(100).execute()
+        if player_val:      query = query.ilike("player_name", f"%{player_val}%")
+        if set_val:         query = query.ilike("set_name",    f"%{set_val}%")
+        if card_number_val: query = query.ilike("card_number", f"%{card_number_val}%")
+        if current:         query = query.ilike("variation",   f"%{current}%")
+        result = query.order("raw_sale_count_30d", desc=True).limit(100).execute()
 
         seen = set()
-        choices = []
-        for row in result.data:
+        base_choices  = []
+        other_choices = []
+        for row in (result.data or []):
             val = (row["variation"] or "").strip()
             if not val or val in seen:
                 continue
             seen.add(val)
-            # Show price alongside variation so users can tell parallels apart
-            raw = row.get("raw_price")
+            raw   = row.get("raw_price")
             psa10 = row.get("psa10_price")
-            price_str = f" — ${raw:.0f} raw" if raw else ""
-            psa10_str = f" · ${psa10:.0f} PSA 10" if psa10 else ""
-            label = f"{val}{price_str}{psa10_str}"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            choices.append(app_commands.Choice(name=label, value=val))
-            if len(choices) >= 25:
-                break
-        return choices
+            price_str = f" — ${float(raw):.0f} raw" if raw else ""
+            psa10_str = f" · ${float(psa10):.0f} PSA 10" if psa10 else ""
+            label  = f"{val}{price_str}{psa10_str}"[:100]
+            choice = app_commands.Choice(name=label, value=val)
+            if val.lower() == "base":
+                base_choices.append(choice)
+            else:
+                other_choices.append(choice)
+
+        return (base_choices + other_choices)[:25]
     except Exception as e:
         print(f"[ERROR] variation_autocomplete: {e}")
         return []
@@ -621,25 +572,21 @@ async def variation_autocomplete(interaction: discord.Interaction, current: str)
 @grade.autocomplete("insert_set")
 async def insert_set_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player
-        set_val    = interaction.namespace.set_name
+        player_val = interaction.namespace.player or ""
+        set_val    = interaction.namespace.set_name or ""
         query = (
             supabase.table("mv_grade_premiums")
             .select("insert_set")
             .not_.is_("insert_set", "null")
         )
-        if player_val and len(player_val) >= 2:
-            query = query.ilike("player_name", f"%{player_val}%")
-        if set_val and len(set_val) >= 2:
-            query = query.ilike("set_name", f"%{set_val}%")
-        if current and len(current) >= 1:
-            query = query.ilike("insert_set", f"%{current}%")
-        query = query.order("raw_sale_count_30d", desc=True)
-        result = query.limit(100).execute()
+        if player_val: query = query.ilike("player_name", f"%{player_val}%")
+        if set_val:    query = query.ilike("set_name",    f"%{set_val}%")
+        if current:    query = query.ilike("insert_set",  f"%{current}%")
+        result = query.order("raw_sale_count_30d", desc=True).limit(100).execute()
 
         seen = set()
         choices = []
-        for row in result.data:
+        for row in (result.data or []):
             val = (row["insert_set"] or "").strip()
             if not val or val in seen:
                 continue
@@ -654,7 +601,7 @@ async def insert_set_autocomplete(interaction: discord.Interaction, current: str
 
 
 # ===========================================================================
-# Run
+# RUN
 # ===========================================================================
 
 client.run(TOKEN)
