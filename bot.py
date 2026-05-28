@@ -447,25 +447,34 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 2:
         return []
     try:
-        # Single query — match player_name OR canonical_name, dedupe by player_name
-        result = (
+        cur = current.lower()
+        # Two separate queries so each can use its own trigram index
+        # OR on two GIN indexes forces a seq scan — UNION does not
+        r1 = (
             supabase.table("mv_grade_premiums")
             .select("player_name, sport, canonical_name, raw_sale_count_30d")
-            .or_(f"player_name.ilike.%{current}%,canonical_name.ilike.%{current}%")
+            .ilike("player_name", f"%{current}%")
             .order("raw_sale_count_30d", desc=True)
-            .limit(60)
+            .limit(50)
+            .execute()
+        )
+        r2 = (
+            supabase.table("mv_grade_premiums")
+            .select("player_name, sport, canonical_name, raw_sale_count_30d")
+            .ilike("canonical_name", f"%{current}%")
+            .order("raw_sale_count_30d", desc=True)
+            .limit(50)
             .execute()
         )
 
         seen = {}
-        for row in (result.data or []):
+        for row in (r1.data or []) + (r2.data or []):
             name = row["player_name"]
             if name in seen:
                 continue
-            # Tag rows only found via canonical so user knows it's a close match
             from_canonical = (
-                current.lower() not in name.lower() and
-                current.lower() in (row.get("canonical_name") or "").lower()
+                cur not in name.lower() and
+                cur in (row.get("canonical_name") or "").lower()
             )
             seen[name] = {"sport": row.get("sport", ""), "from_canonical": from_canonical,
                           "count": row.get("raw_sale_count_30d") or 0}
@@ -490,27 +499,33 @@ async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
         player_val = interaction.namespace.player or ""
 
-        # Single query — match player_name OR canonical_name for the set search
-        query = (
-            supabase.table("mv_grade_premiums")
-            .select("set_name, raw_price, raw_sale_count_30d")
-        )
-        if player_val and len(player_val) >= 2:
-            query = query.or_(f"player_name.ilike.%{player_val}%,canonical_name.ilike.%{player_val}%")
-        if current:
-            query = query.ilike("set_name", f"%{current}%")
-        result = query.order("raw_sale_count_30d", desc=True).limit(100).execute()
+        def set_query(player_field):
+            q = supabase.table("mv_grade_premiums").select("set_name, raw_price, raw_sale_count_30d")
+            if player_val and len(player_val) >= 2:
+                q = q.ilike(player_field, f"%{player_val}%")
+            if current:
+                q = q.ilike("set_name", f"%{current}%")
+            return q.order("raw_sale_count_30d", desc=True).limit(100).execute()
 
-        set_counts = Counter(r["set_name"] for r in (result.data or []))
+        r1 = set_query("player_name")
+        r2 = set_query("canonical_name")
+        all_rows = list(r1.data or [])
+        seen_sets = {r["set_name"] for r in all_rows}
+        for r in (r2.data or []):
+            if r["set_name"] not in seen_sets:
+                all_rows.append(r)
+                seen_sets.add(r["set_name"])
+
+        set_counts = Counter(r["set_name"] for r in all_rows)
         set_price  = {}
-        for r in (result.data or []):
+        for r in all_rows:
             s = r["set_name"]
             if s not in set_price:
                 set_price[s] = r.get("raw_price")
 
         seen = set()
         choices = []
-        for r in (result.data or []):
+        for r in all_rows:
             val = r["set_name"]
             if val in seen:
                 continue
