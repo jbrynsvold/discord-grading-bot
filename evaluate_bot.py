@@ -3,623 +3,571 @@ import discord
 from discord import app_commands
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from datetime import date
 
 load_dotenv()
-TOKEN       = os.getenv("EVALUATE_BOT_TOKEN")   # separate bot token — see setup notes
+TOKEN = os.getenv("DISCORD_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ===========================================================================
-# HELPERS
+# SHARED HELPERS
 # ===========================================================================
+
+def format_currency(amount) -> str:
+    if amount is None:
+        return "N/A"
+    amount = float(amount)
+    if amount >= 0:
+        return f"${amount:,.2f}"
+    return f"-${abs(amount):,.2f}"
 
 def fv(val):
     return float(val) if val is not None else None
 
-def fmt(amount):
-    if amount is None:
-        return "N/A"
-    return f"${float(amount):,.2f}"
-
-def pct(val):
-    if val is None:
-        return "N/A"
-    return f"{float(val):+.1f}%"
+TCG_CATEGORIES = {"Pokemon", "Yu-Gi-Oh", "Other TCG", "Non-Sport Vintage"}
 
 # ===========================================================================
-# GIGASCORE — computed live from mv_card_metrics
+# SELL COMMAND DATA
 # ===========================================================================
 
-def compute_giga_score(m: dict) -> tuple[int, dict]:
-    """
-    Returns (total_score, component_breakdown).
-    Mirrors the four-component formula in generate_candidates.py:
-      - 52w range position  (0-30 pts)
-      - Liquidity           (0-25 pts)
-      - Volume acceleration (0-25 pts)
-      - Price momentum      (0-20 pts)
-    """
-    pct_range     = fv(m.get("pct_of_52w_range"))
-    sale_30d      = fv(m.get("sale_count_30d")) or 0
-    sale_90d      = fv(m.get("sale_count_90d")) or 0
-    sale_3d       = fv(m.get("sale_count_3d"))  or 0
-    avg_3d        = fv(m.get("avg_price_3d"))
-    avg_90d       = fv(m.get("avg_price_90d"))
-    avg_30_90d    = fv(m.get("avg_price_30_90d"))
-    has_90d       = bool(m.get("has_90d_data"))
-    coalesce_3d   = avg_3d if avg_3d is not None else fv(m.get("current_price"))
+PLATFORMS = {
+    "ebay":            {"name": "eBay",               "fee_pct": 0.1295, "fixed_fee": 0.30, "note": "Largest buyer pool. Best for quick sales.",             "emoji": "🟦"},
+    "whatnot":         {"name": "Whatnot",             "fee_pct": 0.08,   "fixed_fee": 0.00, "note": "Live auctions. Good if you have an audience.",          "emoji": "🟣"},
+    "facebook":        {"name": "Facebook Groups",     "fee_pct": 0.00,   "fixed_fee": 0.00, "note": "No fees but requires BST reputation.",                  "emoji": "🔵"},
+    "myslabs":         {"name": "MySlabs",             "fee_pct": 0.05,   "fixed_fee": 0.00, "note": "Low fees, growing graded card marketplace.",            "emoji": "🟤"},
+    "pwcc_marketplace":{"name": "PWCC Marketplace",   "fee_pct": 0.10,   "fixed_fee": 0.00, "note": "Serious buyers, good for mid-to-high graded cards.",    "emoji": "⚫"},
+    "pwcc_weekly":     {"name": "PWCC Weekly Auction", "fee_pct": 0.10,   "fixed_fee": 0.00, "note": "Auction format drives competitive bidding.",            "emoji": "🔶"},
+    "goldin":          {"name": "Goldin",              "fee_pct": 0.15,   "fixed_fee": 0.00, "note": "Premium auction house for high-value cards.",           "emoji": "🟡"},
+    "pwcc_premier":    {"name": "PWCC Premier",        "fee_pct": 0.12,   "fixed_fee": 0.00, "note": "Consignment for high-value cards. Curated audience.",   "emoji": "🏆"},
+    "iconic":          {"name": "Iconic Auctions",     "fee_pct": 0.15,   "fixed_fee": 0.00, "note": "Boutique auction house for premium cards.",             "emoji": "💎"},
+}
 
-    # Component 1 — 52w range position
-    if pct_range is None:
-        c1 = 0
-    elif pct_range <= 10: c1 = 30
-    elif pct_range <= 20: c1 = 25
-    elif pct_range <= 30: c1 = 20
-    elif pct_range <= 45: c1 = 12
-    elif pct_range <= 60: c1 = 5
-    else: c1 = 0
-
-    # Component 2 — Liquidity (sale_count_90d)
-    liq = sale_90d if has_90d else sale_30d * 3
-    if   liq >= 200: c2 = 25
-    elif liq >= 100: c2 = 21
-    elif liq >= 50:  c2 = 17
-    elif liq >= 20:  c2 = 12
-    elif liq >= 10:  c2 = 7
-    elif liq >= 3:   c2 = 3
-    else:            c2 = 0
-
-    # Component 3 — Volume acceleration (GREATEST of three comparisons)
-    def vel_pts(ratio):
-        if ratio is None: return 0
-        if ratio >= 1.5: return 25
-        if ratio >= 1.2: return 18
-        if ratio >= 0.8: return 10
-        return 0
-
-    base_90d = (sale_90d / 3.0) if has_90d and sale_90d else None
-    r1 = (sale_30d / base_90d) if base_90d else None
-    r2 = ((sale_3d * 10) / sale_30d) if sale_30d > 0 else None
-    r3 = ((sale_3d * 30) / sale_90d) if has_90d and sale_90d > 0 else None
-    c3 = max(vel_pts(r1), vel_pts(r2), vel_pts(r3))
-
-    # Component 4 — Price momentum (avg_price_3d vs avg_price_30_90d baseline)
-    baseline = avg_30_90d or avg_90d
-    if coalesce_3d and baseline and baseline > 0:
-        ratio = coalesce_3d / baseline
-        if   ratio <= 0.90: c4 = 20   # dipping vs baseline — good entry
-        elif ratio <= 1.00: c4 = 15
-        elif ratio <= 1.10: c4 = 10
-        elif ratio <= 1.25: c4 = 5
-        else:               c4 = 0    # already run up significantly
+def get_tier(sale_price: float) -> dict:
+    if sale_price < 100:
+        return {"tier": "Budget",  "platforms": ["ebay", "whatnot", "facebook"],                                   "recommended": "ebay",         "advice": "eBay gives the widest buyer pool. Facebook Groups work well if you have BST rep — no fees."}
+    elif sale_price < 500:
+        return {"tier": "Mid",     "platforms": ["ebay", "whatnot", "myslabs", "pwcc_marketplace"],                "recommended": "myslabs",      "advice": "MySlabs has the lowest fees at this range. eBay works if you need a fast sale."}
+    elif sale_price < 2000:
+        return {"tier": "High",    "platforms": ["ebay", "myslabs", "pwcc_marketplace", "pwcc_weekly", "goldin"],  "recommended": "pwcc_weekly",  "advice": "PWCC Weekly brings serious bidders. Goldin worth considering for cards with strong collector demand."}
+    elif sale_price < 10000:
+        return {"tier": "Premium", "platforms": ["pwcc_premier", "goldin", "iconic"],                              "recommended": "pwcc_premier", "advice": "Consignment is worth it here. Get quotes from PWCC Premier and Goldin before committing.", "consignment_note": True}
     else:
-        c4 = 0
+        return {"tier": "Elite",   "platforms": [],                                                                "recommended": None,           "advice": "At $10k+, work directly with a broker — PWCC Premier, Goldin, Heritage Auctions, or Probstein123. Fees are negotiable.", "broker_note": True}
 
-    total = min(100, c1 + c2 + c3 + c4)
-    breakdown = {
-        "range_pos":   (c1, 30,  f"{pct_range:.1f}% of 52w range" if pct_range is not None else "no data"),
-        "liquidity":   (c2, 25,  f"{int(liq)} sales / 90d"),
-        "velocity":    (c3, 25,  f"best ratio: {max(r or 0 for r in [r1,r2,r3] if r is not None):.2f}x" if any(r is not None for r in [r1,r2,r3]) else "no data"),
-        "momentum":    (c4, 20,  f"{coalesce_3d:.2f} vs {baseline:.2f} baseline" if (coalesce_3d and baseline) else "no data"),
-    }
-    return total, breakdown
-
+def calc_net(sale_price, fee_pct, fixed_fee, purchase_price, grading_cost):
+    return sale_price - (sale_price * fee_pct + fixed_fee) - purchase_price - grading_cost
 
 # ===========================================================================
-# HARD RULE CHECKS
+# GRADE COMMAND DATA
 # ===========================================================================
 
-def check_hard_rules(m: dict) -> list[dict]:
-    """
-    Returns list of rule results: {name, passed, reason}
-    HR2 — velocity gate (card must be trading at or above seasonal pace)
-    HR3 — trend gate (card must not be in steep drawdown)
-    HR4 — recency gate (must have sold within 14 days)
-    """
-    rules = []
-    sale_30d   = fv(m.get("sale_count_30d")) or 0
-    sale_90d   = fv(m.get("sale_count_90d")) or 0
-    sale_3d    = fv(m.get("sale_count_3d"))  or 0
-    has_90d    = bool(m.get("has_90d_data"))
-    days_since = fv(m.get("days_since_last_sale"))
-    avg_3d     = fv(m.get("avg_price_3d"))
-    avg_30d    = fv(m.get("avg_price_30d"))
-    current    = fv(m.get("current_price"))
+GRADERS = {
+    "PSA": {
+        "default_tier": "Value", "default_cost": 27.99,
+        "tiers": {
+            "Value":         (27.99,  "~95 business days", 500,   "Cheapest no-membership tier"),
+            "Value Plus":    (44.99,  "~40 business days", 500,   "Faster, same value cap"),
+            "Value Max":     (59.99,  "~30 business days", 1000,  "Higher value cap"),
+            "Regular":       (74.99,  "~20 business days", 1500,  "Most common mid-tier"),
+            "Express":       (160.00, "~10 business days", 2999,  "Fast turnaround"),
+            "Super Express": (300.00, "~5 business days",  4999,  "Highest priority"),
+        },
+        "notes": "Highest resale premiums. Best liquidity for most sports cards.",
+        "emoji": "🟦",
+        "membership_note": "PSA Collectors Club ($149/yr) unlocks Value Bulk at ~$21.99/card (20+ cards)",
+    },
+    "BGS": {
+        "default_tier": "Base", "default_cost": 14.95,
+        "tiers": {
+            "Base":     (14.95,  "~75 days", None, "No membership needed. Sub-grades included free."),
+            "Standard": (34.95,  "~45 days", None, "Best balance of cost and speed"),
+            "Express":  (79.95,  "~15 days", None, "Fast turnaround"),
+            "Priority": (124.95, "~5 days",  None, "Fastest BGS service"),
+        },
+        "notes": "Sub-grades free on every card. Best for modern chrome/autos. Black Label (quad 10s) commands huge premiums.",
+        "emoji": "⚫",
+        "membership_note": "No annual membership required.",
+    },
+    "SGC": {
+        "default_tier": "Standard", "default_cost": 15.00,
+        "tiers": {
+            "Standard":  (15.00, "~15-20 business days", 1500, "Best value for speed. No upcharges on modern cards."),
+            "Immediate": (40.00, "~1-2 business days",   1500, "Fastest turnaround in the industry"),
+        },
+        "notes": "Fast turnaround. Great for vintage and budget submissions. Free auto grade on cards that receive a 10.",
+        "emoji": "🟤",
+        "membership_note": "No membership required.",
+    },
+    "CGC": {
+        "default_tier": "Economy", "default_cost": 17.00,
+        "tiers": {
+            "Bulk":        (14.00,  "~80 days", 500,   "25-card minimum required"),
+            "Economy":     (17.00,  "~40 days", 1000,  "No minimum. Best single-card budget option."),
+            "Express":     (50.00,  "~10 days", 3000,  "Fast and mid-range"),
+            "WalkThrough": (150.00, "~2 days",  10000, "Fastest CGC service"),
+        },
+        "notes": "Competitive pricing. Strong for TCG (Pokemon, MTG). Free account; paid members save 10-20%.",
+        "emoji": "🟡",
+        "membership_note": "Free account available. Associate/Premium: 10% off. Elite: 20% off. Starts at $25/yr.",
+    },
+}
 
-    # HR2 — velocity: 30d pace vs 90d baseline
-    base_90d = (sale_90d / 3.0) if has_90d and sale_90d else None
-    if base_90d and base_90d > 0:
-        vel_ratio = sale_30d / base_90d
-        if vel_ratio >= 0.5:
-            rules.append({"name": "HR2 velocity", "passed": True,
-                          "reason": f"trading at {vel_ratio:.1f}x seasonal pace"})
+def get_grader_rec(raw, psa9, psa10, grading_score, vintage):
+    if vintage: return "PSA"
+    if grading_score >= 8.0 and psa10 and psa10 > 200: return "PSA"
+    if psa10 and psa10 < 100: return "SGC"
+    if psa10 and psa10 < 300: return "CGC"
+    return "PSA"
+
+def should_grade(raw, psa9, psa10, grading_cost, grading_score, psa9_mult):
+    if not raw or not psa9:
+        return None, "Not enough price data to make a recommendation.", False
+    total_cost = raw + grading_cost
+    psa10_mult_actual = (psa10 / total_cost) if (psa10 and total_cost > 0) else 0
+    uplift = psa9 - raw - grading_cost
+    hard_to_grade = psa9_mult and psa9_mult >= 5.0
+    warning = ""
+    if hard_to_grade:
+        warning = f"\n⚠️ PSA 9 is {psa9_mult:.1f}x raw — this card is historically difficult to grade. High risk of low grade or rejection. Verify condition carefully before submitting."
+    if psa10_mult_actual >= 2.5:
+        return True, f"PSA 10 ({format_currency(psa10)}) is {psa10_mult_actual:.1f}x your total cost ({format_currency(total_cost)}). Strong grading candidate.{warning}", hard_to_grade
+    if uplift < 0:
+        return False, f"PSA 9 nets you {format_currency(uplift)} after grading cost. Sell raw.{warning}", hard_to_grade
+    if uplift < 30:
+        if grading_score >= 50:
+            return True, f"Marginal uplift ({format_currency(uplift)}) but grading score of {grading_score:.0f}/100 suggests card grades well. Proceed if condition is strong.{warning}", hard_to_grade
         else:
-            rules.append({"name": "HR2 velocity", "passed": False,
-                          "reason": f"only {vel_ratio:.1f}x seasonal pace — below minimum threshold"})
-    else:
-        rules.append({"name": "HR2 velocity", "passed": True,
-                      "reason": "insufficient 90d data — not blocked"})
-
-    # HR3 — trend: not in >15% drawdown vs 30d avg
-    price_ref = avg_3d or current
-    if price_ref and avg_30d and avg_30d > 0:
-        trend_pct = ((price_ref - avg_30d) / avg_30d) * 100
-        if trend_pct > -15:
-            rules.append({"name": "HR3 trend", "passed": True,
-                          "reason": f"{trend_pct:+.1f}% vs 30d avg — not in drawdown"})
-        else:
-            rules.append({"name": "HR3 trend", "passed": False,
-                          "reason": f"{trend_pct:+.1f}% vs 30d avg — steep drawdown"})
-    else:
-        rules.append({"name": "HR3 trend", "passed": True,
-                      "reason": "insufficient data — not blocked"})
-
-    # HR4 — recency: sold within 14 days
-    if days_since is not None:
-        if days_since <= 14:
-            rules.append({"name": "HR4 recency", "passed": True,
-                          "reason": f"last sale {int(days_since)}d ago"})
-        else:
-            rules.append({"name": "HR4 recency", "passed": False,
-                          "reason": f"last sale {int(days_since)}d ago — market gone quiet"})
-    else:
-        rules.append({"name": "HR4 recency", "passed": False,
-                      "reason": "no sale date on record"})
-
-    return rules
-
+            return False, f"Upside of only {format_currency(uplift)} and grading score of {grading_score:.0f}/100 is below average. Sell raw.{warning}", hard_to_grade
+    return True, f"PSA 9 uplift of {format_currency(uplift)} over raw justifies the ${grading_cost:.2f} grading cost.{warning}", hard_to_grade
 
 # ===========================================================================
-# VERDICT
-# ===========================================================================
-
-def build_fail_reason(failed: list[dict], score: int, card: dict) -> str:
-    """
-    Build a plain-English sentence tailored to exactly which checks failed
-    and what the score looks like. No internal terms.
-    """
-    failed_names = {r["name"] for r in failed}
-    days_since = int(float(card.get("days_since_last_sale") or 0))
-    sale_30d   = int(card.get("sale_count_30d") or 0)
-    pct_range  = float(card.get("pct_of_52w_range") or 0)
-
-    # Single failure cases
-    if failed_names == {"HR4 recency"}:
-        return (
-            f"This card hasn't sold in {days_since} days. Without recent sales activity "
-            f"we can't get a reliable read on where it's actually trading. "
-            f"Check back if it starts moving again."
-        )
-    if failed_names == {"HR2 velocity"}:
-        return (
-            f"Trading volume has dropped well below its normal pace — only {sale_30d} sales "
-            f"in the last 30 days. We look for cards with consistent buyer interest before calling a setup."
-        )
-    if failed_names == {"HR3 trend"}:
-        return (
-            f"The price is in a meaningful decline right now. We avoid flagging cards "
-            f"that are actively falling — the setup needs to stabilize first."
-        )
-
-    # Two failures
-    if failed_names == {"HR4 recency", "HR2 velocity"}:
-        return (
-            f"This card has gone quiet — {sale_30d} sales in 30 days and the last one was "
-            f"{days_since} days ago. We need to see active trading before we can evaluate the setup."
-        )
-    if failed_names == {"HR4 recency", "HR3 trend"}:
-        return (
-            f"Price has been declining and the card hasn't sold in {days_since} days. "
-            f"Two red flags at once — not a setup we'd act on right now."
-        )
-    if failed_names == {"HR2 velocity", "HR3 trend"}:
-        return (
-            f"Volume is thin and the price trend is heading down. "
-            f"We look for cards that are trading actively and holding their value before flagging a buy."
-        )
-
-    # All three failed
-    if len(failed) >= 3:
-        return (
-            f"This card isn't trading actively, volume is thin, and the price trend is negative. "
-            f"None of our baseline criteria are met right now."
-        )
-
-    # Score-only failure (all rules passed but score too low)
-    if not failed:
-        if pct_range > 60:
-            return (
-                f"The card has already moved up significantly from its yearly low — "
-                f"it's at {pct_range:.0f}% of its 52-week range. "
-                f"We prefer to flag cards earlier in their setup, not after they've run."
-            )
-        return (
-            f"The card passes our activity checks but the overall setup isn't strong enough yet. "
-            f"It's scoring {score}/100 — we look for 65+ to call a buy. "
-            f"Could improve if volume picks up or price pulls back further."
-        )
-
-    # Fallback
-    return "Doesn't meet our criteria right now."
-
-
-def get_verdict(score: int, rules: list[dict], already_spiked: bool,
-                pct_of_range: float | None, card: dict = None) -> tuple[str, int, str]:
-    """
-    Returns (verdict_label, embed_color, reasoning).
-    """
-    all_pass = all(r["passed"] for r in rules)
-    failed   = [r for r in rules if not r["passed"]]
-    card     = card or {}
-
-    if already_spiked:
-        return (
-            "Sell / Pass",
-            0xED4245,
-            "This card has already made its move. The window has passed — buying now means chasing.",
-        )
-
-    if pct_of_range is not None and pct_of_range > 110:
-        return (
-            "Sell / Pass",
-            0xED4245,
-            f"At {pct_of_range:.0f}% of its yearly range, this card is trading well above where it's historically topped out. Not a good entry.",
-        )
-
-    if not all_pass:
-        return (
-            "Pass",
-            0x888780,
-            build_fail_reason(failed, score, card),
-        )
-
-    if score >= 65:
-        range_str = f"sitting at just {pct_of_range:.0f}% of its yearly range" if pct_of_range is not None else "near its yearly low"
-        return (
-            "Buy",
-            0x1D9E75,
-            f"Everything checks out. Active trading, healthy volume, and {range_str} — this is the kind of setup we look for.",
-        )
-    if score >= 55:
-        return (
-            "Hold",
-            0xEF9F27,
-            f"Passes our activity checks but the setup isn't quite there yet — scoring {score}/100. Worth keeping an eye on but not a strong entry right now.",
-        )
-    return (
-        "Pass",
-        0x888780,
-        build_fail_reason(failed, score, card),
-    )
-
-
-# ===========================================================================
-# BOT SETUP
+# Bot setup
 # ===========================================================================
 
 intents = discord.Intents.default()
-client  = discord.Client(intents=intents)
-tree    = app_commands.CommandTree(client)
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
     await tree.sync()
-    print(f"[OK] EvaluateBot is online as {client.user}")
-
+    print(f"[OK] CardBot is online as {client.user}")
 
 # ===========================================================================
-# /evaluate
+# /sell
 # ===========================================================================
 
-@tree.command(name="evaluate", description="Should you buy, hold, or pass on this card? GIGA scores it against our full criteria.")
+@tree.command(name="sell", description="Calculate net profit and get platform recommendations for selling a card")
+@app_commands.describe(
+    sale_price="Expected sale price in USD",
+    purchase_price="What you paid for the card (default: 0)",
+    grading_cost="Grading cost if applicable (default: 0)",
+)
+async def sell(interaction: discord.Interaction, sale_price: float, purchase_price: float = 0.0, grading_cost: float = 0.0):
+    await interaction.response.defer(ephemeral=True)
+    tier_data = get_tier(sale_price)
+    if tier_data.get("broker_note"):
+        embed = discord.Embed(title=f"💎 Elite Tier — ${sale_price:,.0f}", description=tier_data["advice"], color=0xFFD700)
+        embed.add_field(name="Who to Contact", value="• **PWCC Premier** — pwccmarketplace.com\n• **Goldin** — goldin.co\n• **Heritage Auctions** — ha.com\n• **Probstein123** — probstein123.com", inline=False)
+        embed.set_footer(text="Fees and terms are negotiable at this level. Get quotes from multiple houses.")
+        await interaction.followup.send(embed=embed)
+        return
+    color_map = {"Budget": 0x57F287, "Mid": 0x5865F2, "High": 0xFEE75C, "Premium": 0xED4245}
+    embed = discord.Embed(title=f"💰 Sell Analysis — ${sale_price:,.2f}", color=color_map.get(tier_data["tier"], 0x5865F2))
+    parts = [f"**Sale Price:** ${sale_price:,.2f}"]
+    if purchase_price > 0: parts.append(f"**Paid:** ${purchase_price:,.2f}")
+    if grading_cost > 0: parts.append(f"**Grading:** ${grading_cost:,.2f}")
+    embed.description = "  ·  ".join(parts)
+    lines = []
+    for key in tier_data["platforms"]:
+        p = PLATFORMS[key]
+        net = calc_net(sale_price, p["fee_pct"], p["fixed_fee"], purchase_price, grading_cost)
+        fee_amt = sale_price * p["fee_pct"] + p["fixed_fee"]
+        star = " ⭐" if key == tier_data["recommended"] else ""
+        fee_str = "No fees" if p["fee_pct"] == 0 and p["fixed_fee"] == 0 else (f"{p['fee_pct']*100:.1f}% + ${p['fixed_fee']:.2f}" if p["fixed_fee"] > 0 else f"{p['fee_pct']*100:.1f}%")
+        lines.append(f"{p['emoji']} **{p['name']}**{star}\n  Fee: {fee_str} (${fee_amt:,.2f})  →  Net: **{format_currency(net)}**\n  _{p['note']}_")
+    embed.add_field(name=f"📊 Platform Breakdown ({tier_data['tier']} Tier)", value="\n\n".join(lines), inline=False)
+    if tier_data["recommended"]:
+        bp = PLATFORMS[tier_data["recommended"]]
+        best_net = calc_net(sale_price, bp["fee_pct"], bp["fixed_fee"], purchase_price, grading_cost)
+        embed.add_field(name="⭐ Recommendation", value=f"**{bp['name']}** — nets you **{format_currency(best_net)}**\n{tier_data['advice']}", inline=False)
+    if tier_data.get("consignment_note"):
+        embed.add_field(name="📋 Consignment Tip", value="Get quotes from multiple houses before committing. Rates shown are standard — some are negotiable.", inline=False)
+    embed.set_footer(text="Fees are estimates. Always verify current rates before selling.")
+    await interaction.followup.send(embed=embed)
+
+# ===========================================================================
+# /grade
+# ===========================================================================
+
+GRADE_SELECT = (
+    "player_name, set_name, set_year, card_number, variation, insert_set, canonical_name, is_rookie, sport, "
+    "raw_price, psa9_price, psa10_price, grading_score, "
+    "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
+    "bgs9_price, bgs95_price, bgs10_price, "
+    "sgc9_price, sgc95_price, sgc10_price, "
+    "cgc9_price, cgc95_price, cgc10_price, cgc10_pristine_price"
+)
+
+def build_grade_query(player: str, set_name: str, variation: str, insert_set: str, card_number: str):
+    q = (
+        supabase.table("mv_grade_premiums")
+        .select(GRADE_SELECT)
+        .ilike("player_name", f"%{player}%")
+        .ilike("set_name", f"%{set_name}%")
+    )
+    if variation:
+        q = q.ilike("variation", f"%{variation.strip()}%")
+    else:
+        q = q.is_("variation", "null")
+
+    if insert_set:
+        q = q.ilike("insert_set", f"%{insert_set}%")
+    else:
+        q = q.is_("insert_set", "null")
+
+    if card_number:
+        q = q.ilike("card_number", f"%{card_number}%")
+
+    return q
+
+
+@tree.command(name="grade", description="Look up a card and get a grading company comparison + recommendation")
 @app_commands.describe(
     player="Player or character name — start typing for suggestions",
     set_name="Set name — start typing for filtered suggestions",
-    grade="Grade (e.g. Raw, PSA 10, BGS 9.5) — default: Raw",
-    card_number="Optional: card number to narrow results",
-    variation="Parallel or variation (e.g. Base, Blue Refractor, Gold Prizm)",
+    variation="Optional: parallel/variation (e.g. Blue Refractor, Gold Prizm) — leave blank for base",
+    insert_set="Optional: insert set name (e.g. Deep Space, Luck of the Lottery) — leave blank for non-inserts",
+    card_number="Optional: card number to narrow results (e.g. 4, 025, SWSH001)",
+    is_vintage="Is this a vintage card (pre-1980)?",
+    override_tier="Optional: use a faster tier (e.g. Express, Regular) for paid members",
 )
-async def evaluate(
+@app_commands.choices(is_vintage=[
+    app_commands.Choice(name="No (Modern)", value=0),
+    app_commands.Choice(name="Yes (Vintage, pre-1980)", value=1),
+])
+async def grade(
     interaction: discord.Interaction,
     player: str,
     set_name: str,
-    grade: str = "Raw",
-    variation: str = "Base",
+    variation: str = None,
+    insert_set: str = None,
     card_number: str = None,
+    is_vintage: int = 0,
+    override_tier: str = None,
 ):
     await interaction.response.defer(ephemeral=True)
 
-    # --- Card lookup via RPC (uses indexed sports/tcg schemas) ---
     try:
-        result = supabase.rpc("evaluate_card", {
-            "p_player":      player,
-            "p_set":         set_name,
-            "p_grade":       grade,
-            "p_variation":   variation or "",
-            "p_card_number": card_number or "",
-        }).execute()
+        result = build_grade_query(player, set_name, variation, insert_set, card_number).limit(5).execute()
+
+        if not result.data:
+            q2 = (
+                supabase.table("mv_grade_premiums")
+                .select(GRADE_SELECT)
+                .ilike("player_name", f"%{player}%")
+                .ilike("set_name", f"%{set_name}%")
+            )
+            if variation:
+                q2 = q2.ilike("variation", f"%{variation.strip()}%")
+            if insert_set:
+                q2 = q2.ilike("insert_set", f"%{insert_set}%")
+            if card_number:
+                q2 = q2.ilike("card_number", f"%{card_number}%")
+            result = q2.limit(5).execute()
+
+        # Pass 3: canonical_name — catches VMAX/EX/GX suffix cards
+        if not result.data:
+            q3 = (
+                supabase.table("mv_grade_premiums")
+                .select(GRADE_SELECT)
+                .ilike("canonical_name", f"%{player}%")
+                .ilike("set_name", f"%{set_name}%")
+            )
+            if card_number:
+                q3 = q3.ilike("card_number", f"%{card_number}%")
+            result = q3.limit(5).execute()
 
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] Database error: {e}")
+        await interaction.followup.send(f"[ERROR] Database query failed: {e}")
         return
 
     if not result.data:
         await interaction.followup.send(
-            f"No card found for **{player}** in **{set_name}** ({grade}).\n"
-            "Try a partial name, different grade, or add a card number to narrow it down."
+            f"No card found for **{player}** in **{set_name}**.\n"
+            f"Try adjusting the name or set — partial matches work. "
+            f"If searching for a card like 'Gengar EX', try just the base name (e.g. 'Gengar') and use card number to narrow it down."
         )
         return
 
-    # If multiple grades came back, prefer the requested grade
-    card = result.data[0]
     if len(result.data) > 1:
-        grade_lower = grade.lower()
-        for row in result.data:
-            if row.get("grade", "").lower() == grade_lower:
-                card = row
-                break
+        lines = []
+        for i, c in enumerate(result.data, 1):
+            price_str = f"Raw ${c['raw_price']:.0f}" if c.get("raw_price") else "No raw price"
+            psa10_str = f" · PSA 10 ${c['psa10_price']:.0f}" if c.get("psa10_price") else ""
+            variation_str = f" · {c['variation']}" if c.get("variation") else ""
+            insert_str = f" · {c['insert_set']}" if c.get("insert_set") else ""
+            num_str = f" #{c['card_number']}" if c.get("card_number") else ""
+            lines.append(
+                f"**{i}.** {c['set_name']}{num_str}{variation_str}{insert_str}\n"
+                f"    {price_str}{psa10_str}"
+            )
+        embed = discord.Embed(
+            title=f"🔎 Multiple matches for '{player}'",
+            description=(
+                "Found more than one card. Re-run `/grade` with a more specific set name, "
+                "variation, or card number to narrow it down.\n\n"
+                + "\n\n".join(lines)
+            ),
+            color=0x5865F2,
+        )
+        embed.set_footer(text="Tip: add the card number (e.g. card_number:114) to jump straight to the right card.")
+        await interaction.followup.send(embed=embed)
+        return
 
-    card_id   = card.get("card_id")
-    card_grade = card.get("grade", grade)
+    card = result.data[0]
+    raw    = fv(card.get("raw_price"))
+    psa9   = fv(card.get("psa9_price"))
+    psa10  = fv(card.get("psa10_price"))
+    gs     = fv(card.get("grading_score")) or 0.0
+    vintage = bool(is_vintage)
+    bgs9   = fv(card.get("bgs9_price"))
+    bgs95  = fv(card.get("bgs95_price"))
+    bgs10  = fv(card.get("bgs10_price"))
+    sgc9   = fv(card.get("sgc9_price"))
+    sgc95  = fv(card.get("sgc95_price"))
+    sgc10  = fv(card.get("sgc10_price"))
+    cgc9   = fv(card.get("cgc9_price"))
+    cgc95  = fv(card.get("cgc95_price"))
+    cgc10  = fv(card.get("cgc10_price"))
+    cgc10p = fv(card.get("cgc10_pristine_price"))
+    psa9_mult  = fv(card.get("raw_to_psa9_mult"))
+    psa10_mult = fv(card.get("raw_to_psa10_mult"))
+    p9p10_mult = fv(card.get("psa9_to_psa10_mult"))
 
-    # --- Compute GigaScore ---
-    score, breakdown = compute_giga_score(card)
+    rec_grader = get_grader_rec(raw, psa9, psa10, gs, vintage)
+    grading_cost_default = GRADERS["PSA"]["default_cost"]
+    grade_it, grade_reason, hard_to_grade = should_grade(raw, psa9, psa10, grading_cost_default, gs, psa9_mult)
 
-    # --- Hard rules ---
-    rules = check_hard_rules(card)
-
-    # --- Watchlist check (watching status only) ---
-    watchlist_entry = None
-    try:
-        r = supabase.rpc("get_watchlist_entry", {
-            "p_card_id": card_id,
-            "p_grade": card_grade,
-        }).execute()
-        if r.data:
-            watchlist_entry = r.data[0]
-    except Exception:
-        pass  # watchlist check is best-effort
-
-    # --- Spike library check ---
-    already_spiked = False
-    spike_info = None
-    try:
-        r = supabase.rpc("get_spike_entry", {
-            "p_card_id": card_id,
-            "p_grade": card_grade,
-        }).execute()
-        if r.data:
-            s = r.data[0]
-            spike_date = s.get("spike_start_date")
-            resolution = s.get("resolution", "")
-            if spike_date:
-                from datetime import datetime
-                days_ago = (date.today() - datetime.strptime(str(spike_date), "%Y-%m-%d").date()).days
-                if days_ago <= 60 and resolution not in ("faded", "resolved"):
-                    already_spiked = True
-                    spike_info = s
-    except Exception:
-        pass  # spike check is best-effort
-
-    # --- Verdict ---
-    pct_range = fv(card.get("pct_of_52w_range"))
-    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card)
-
-    # --- Build embed ---
-    card_name  = card.get("player_name", player)
-    set_display = card.get("set_name", set_name)
-    card_num   = card.get("card_number")
-    variation_val = card.get("variation")
-    insert_val = card.get("insert_set")
-    is_rookie  = card.get("is_rookie", False)
-
-    subtitle = f"{set_display}"
-    if card_num:   subtitle += f" #{card_num}"
-    if variation_val: subtitle += f" · {variation_val}"
-    if insert_val: subtitle += f" · {insert_val}"
-    subtitle += f" · {card_grade}"
-    if is_rookie:  subtitle += " · 🌟 RC"
-
-    # --- Price data ---
-    current  = fv(card.get("current_price"))
-    avg_30d  = fv(card.get("avg_price_30d"))
-    avg_90d  = fv(card.get("avg_price_90d"))
-    low_52w  = fv(card.get("low_52w"))
-    high_52w = fv(card.get("high_52w"))
-    sale_30d = card.get("sale_count_30d") or 0
-    pct_range = fv(card.get("pct_of_52w_range"))
-
-    trend_str = "N/A"
-    if current and avg_30d and avg_30d > 0:
-        trend_val = ((current - avg_30d) / avg_30d) * 100
-        trend_str = f"{trend_val:+.1f}%"
-
-    range_str = "N/A"
-    if pct_range is not None:
-        range_str = f"{pct_range:.0f}% of year range"
-
-    # --- Plain English flags for failed rules ---
-    rule_plain = {
-        "HR2 velocity": "Trading volume is too low right now",
-        "HR3 trend":    "Price is in a steep decline",
-        "HR4 recency":  f"Hasn't sold in {int(fv(card.get('days_since_last_sale')) or 0)} days — market gone quiet",
-    }
-    failed_rules = [r for r in rules if not r["passed"]]
-    flag_lines = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in failed_rules]
-
-    # --- Score label ---
-    if score >= 65:
-        score_label = "Strong"
-    elif score >= 55:
-        score_label = "Average"
-    else:
-        score_label = "Weak"
-
-    # --- Verdict icons ---
-    verdict_icons = {
-        "Buy":         "✅",
-        "Hold":        "🟡",
-        "Pass":        "⬜",
-        "Sell / Pass": "❌",
-    }
-    icon = verdict_icons.get(verdict, "")
-
-    # --- Build embed ---
+    color = 0x57F287 if grade_it else (0xED4245 if grade_it is False else 0x5865F2)
     embed = discord.Embed(
-        title=f"{icon} {verdict} — {card_name}",
+        title=f"🔎 Grade Analysis — {card['player_name']}",
         description=(
-            f"{subtitle}\n\n"
-            f"_{reasoning}_"
-            + (f"\n\n" + "\n".join(flag_lines) if flag_lines else "")
-            + (f"\n\n📋 **On GIGA watchlist since {watchlist_entry.get('flagged_date')}**" if watchlist_entry else "")
+            f"{card['set_name']} #{card.get('card_number', '?')}"
+            + (f" · {card['variation']}" if card.get('variation') else "")
+            + (f" · 📋 {card['insert_set']}" if card.get('insert_set') else "")
+            + (" · 🌟 Rookie" if card.get('is_rookie') else "")
         ),
         color=color,
     )
 
-    # Spike warning
-    if spike_info:
-        sp = spike_info
-        embed.add_field(
-            name="⚠️ Already spiked",
-            value=(
-                f"Peaked at {fmt(sp.get('peak_spike_price'))} "
-                f"(+{sp.get('price_change_pct', 0):.0f}%) on {sp.get('spike_start_date')}. "
-                f"Don't chase it."
-            ),
-            inline=False,
-        )
-
-    # 6-stat grid matching Option A mockup
-    embed.add_field(name="Current price", value=f"**{fmt(current)}**", inline=True)
-    embed.add_field(name="30d avg",       value=fmt(avg_30d),           inline=True)
-    embed.add_field(name="90d avg",       value=fmt(avg_90d),           inline=True)
-    embed.add_field(name="Year range",    value=f"{fmt(low_52w)} – {fmt(high_52w)}", inline=True)
-    embed.add_field(name="Sales / 30d",   value=str(sale_30d),          inline=True)
-    embed.add_field(name="Trend",         value=trend_str,              inline=True)
-
-    # GIGA Score — single number + label, no breakdown
     embed.add_field(
-        name="GIGA Score",
-        value=f"**{score} / 100** — {score_label}",
+        name="💵 Price Snapshot (Raw vs PSA)",
+        value=(
+            f"Raw: **{format_currency(raw)}**\n"
+            f"PSA 9: **{format_currency(psa9)}**" + (f" ({psa9_mult:.1f}x raw)" if psa9_mult else "") + "\n"
+            f"PSA 10: **{format_currency(psa10)}**" + (f" ({psa10_mult:.1f}x raw)" if psa10_mult else "") + "\n"
+            f"PSA 9 → PSA 10 jump: **{f'{p9p10_mult:.1f}x' if p9p10_mult else 'N/A'}**"
+        ),
         inline=False,
     )
 
-    embed.set_footer(text="GIGA · Not financial advice")
+    score_label = (
+        "🟢 Excellent — strong candidate for high grade" if gs >= 70
+        else "🟡 Average — grade outcome uncertain" if gs >= 40
+        else "🔴 Low — higher risk of poor grade"
+    )
+    embed.add_field(name="📊 Grading Score", value=f"**{gs:.0f} / 100**\n{score_label}", inline=True)
+    grade_display = "✅ **Yes**" if grade_it else ("❌ **No**" if grade_it is False else "⚠️ **Unclear**")
+    embed.add_field(name="🎯 Should You Grade?", value=f"{grade_display}\n{grade_reason}", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=False)
+    embed.add_field(name="🏢 Grader Comparison", value="Cheapest no-membership tier shown. Use `override_tier` for faster options.", inline=False)
+
+    for gk, gd in GRADERS.items():
+        tier_name = override_tier if (override_tier and override_tier in gd["tiers"]) else gd["default_tier"]
+        cost, turnaround, max_val, _ = gd["tiers"][tier_name]
+        rec_tag = " ⭐" if gk == rec_grader else ""
+
+        if gk == "PSA":
+            uplift = (psa9 - raw - cost) if (psa9 and raw) else None
+            price_str = (
+                f"PSA 9: **{format_currency(psa9)}** · PSA 10: **{format_currency(psa10)}**\n"
+                f"Uplift (PSA 9 vs raw): **{format_currency(uplift)}**"
+            )
+        elif gk == "BGS":
+            if any([bgs9, bgs95, bgs10]):
+                best = bgs95 or bgs9 or bgs10
+                best_label = "BGS 9.5" if bgs95 else ("BGS 10" if bgs10 else "BGS 9")
+                uplift = (best - raw - cost) if (best and raw) else None
+                price_str = (
+                    f"BGS 9: **{format_currency(bgs9)}** · 9.5: **{format_currency(bgs95)}** · 10: **{format_currency(bgs10)}**\n"
+                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
+                )
+            else:
+                uplift = (psa9 - raw - cost) if (psa9 and raw) else None
+                price_str = f"_No BGS sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
+        elif gk == "SGC":
+            if any([sgc9, sgc95, sgc10]):
+                best = sgc10 or sgc95 or sgc9
+                best_label = "SGC 10" if sgc10 else ("SGC 9.5" if sgc95 else "SGC 9")
+                uplift = (best - raw - cost) if (best and raw) else None
+                price_str = (
+                    f"SGC 9: **{format_currency(sgc9)}** · 9.5: **{format_currency(sgc95)}** · 10: **{format_currency(sgc10)}**\n"
+                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
+                )
+            else:
+                uplift = (psa9 - raw - cost) if (psa9 and raw) else None
+                price_str = f"_No SGC sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
+        elif gk == "CGC":
+            if any([cgc9, cgc95, cgc10, cgc10p]):
+                best = cgc10p or cgc10 or cgc95 or cgc9
+                best_label = "CGC 10 Pristine" if cgc10p else ("CGC 10" if cgc10 else ("CGC 9.5" if cgc95 else "CGC 9"))
+                uplift = (best - raw - cost) if (best and raw) else None
+                pristine_str = f" · Pristine: **{format_currency(cgc10p)}**" if cgc10p else ""
+                price_str = (
+                    f"CGC 9: **{format_currency(cgc9)}** · 9.5: **{format_currency(cgc95)}** · 10: **{format_currency(cgc10)}**{pristine_str}\n"
+                    f"Uplift ({best_label} vs raw): **{format_currency(uplift)}**"
+                )
+            else:
+                uplift = (psa9 - raw - cost) if (psa9 and raw) else None
+                price_str = f"_No CGC sales in DB — PSA proxy_\nEst. uplift: **{format_currency(uplift)}**"
+
+        embed.add_field(
+            name=f"{gd['emoji']} {gk}{rec_tag}",
+            value=f"Cost: **${cost:.2f}** · {turnaround}\n{price_str}",
+            inline=True,
+        )
+
+    embed.add_field(
+        name="💳 Membership Savings",
+        value=(
+            "**PSA:** Collectors Club $149/yr → ~$21.99/card bulk\n"
+            "**BGS:** No membership required\n"
+            "**SGC:** No membership required\n"
+            "**CGC:** Free acct full price · $25+/yr → 10-20% off"
+        ),
+        inline=False,
+    )
+    if not override_tier:
+        embed.add_field(name="💡 Tip", value="Re-run with `override_tier` set to e.g. `Express` or `Regular` to see costs for a faster tier.", inline=False)
+
+    embed.set_footer(text="Prices from DB (30-day median sales). Grading costs as of early 2026 — verify on grader websites before submitting.")
     await interaction.followup.send(embed=embed)
 
 
 # ===========================================================================
-# AUTOCOMPLETE — same pattern as grade bot
+# Autocomplete handlers
 # ===========================================================================
 
-@evaluate.autocomplete("player")
-async def eval_player_autocomplete(interaction: discord.Interaction, current: str):
+@grade.autocomplete("player")
+async def player_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 2:
         return []
     try:
-        # Use RPC function that queries sports + tcg schemas via trigram indexes
-        result = supabase.rpc(
-            "search_player_names",
-            {"p_search": current, "p_limit": 25}
-        ).execute()
+        # Always run BOTH passes and merge — don't gate Pass 2 on sparse results.
+        # This ensures "Deoxys VMAX" surfaces both the exact match AND plain "Deoxys"
+        # (which holds the Crown Zenith card), ranked correctly.
+
+        result1 = (
+            supabase.table("mv_grade_premiums")
+            .select("player_name, sport, raw_sale_count_30d")
+            .ilike("player_name", f"%{current}%")
+            .order("raw_sale_count_30d", desc=True)
+            .limit(50)
+            .execute()
+        )
+
+        result2 = (
+            supabase.table("mv_grade_premiums")
+            .select("player_name, sport, canonical_name, raw_sale_count_30d")
+            .ilike("canonical_name", f"%{current}%")
+            .order("raw_sale_count_30d", desc=True)
+            .limit(50)
+            .execute()
+        )
+
+        # Build combined dict keyed by player_name, tracking source
+        p1_names = {r["player_name"] for r in result1.data}
+        combined = {}
+        for r in result1.data:
+            combined[r["player_name"]] = {"sport": r.get("sport", ""), "from_canonical": False, "count": r.get("raw_sale_count_30d") or 0}
+        for r in result2.data:
+            name = r["player_name"]
+            if name not in combined:
+                combined[name] = {"sport": r.get("sport", ""), "from_canonical": True, "count": r.get("raw_sale_count_30d") or 0}
+
+        # Sort: exact/partial player_name matches first (higher count), then canonical matches
+        sorted_names = sorted(
+            combined.keys(),
+            key=lambda n: (combined[n]["from_canonical"], -(combined[n]["count"] or 0))
+        )
 
         choices = []
-        for row in (result.data or []):
-            name = row.get("result_name", "")
-            if not name:
-                continue
-            label = name if len(name) <= 100 else name[:97] + "..."
-            choices.append(app_commands.Choice(name=label, value=name))
-        return choices
-    except Exception as e:
-        print(f"[ERROR] eval_player_autocomplete: {e}")
-        return []
-
-
-@evaluate.autocomplete("set_name")
-async def eval_set_autocomplete(interaction: discord.Interaction, current: str):
-    try:
-        player_val = interaction.namespace.player or ""
-        result = supabase.rpc(
-            "search_set_names",
-            {"p_player": player_val, "p_search": current or "", "p_limit": 25}
-        ).execute()
-
-        choices = []
-        for row in (result.data or []):
-            name = row.get("set_name", "")
-            year = row.get("set_year", "?")
-            if not name:
-                continue
-            label = f"{name} ({year})"
+        for name in sorted_names:
+            info = combined[name]
+            sport = info["sport"]
+            fuzzy_tag = " ~" if info["from_canonical"] else ""
+            label = f"{name} ({sport}){fuzzy_tag}"
             if len(label) > 100:
                 label = label[:97] + "..."
             choices.append(app_commands.Choice(name=label, value=name))
-        return choices
-    except Exception as e:
-        print(f"[ERROR] eval_set_autocomplete: {e}")
-        return []
-
-
-@evaluate.autocomplete("grade")
-async def eval_grade_autocomplete(interaction: discord.Interaction, current: str):
-    try:
-        player_val = interaction.namespace.player or ""
-        set_val    = interaction.namespace.set_name or ""
-        result = supabase.rpc(
-            "search_grades",
-            {"p_player": player_val, "p_set": set_val, "p_search": current or "", "p_limit": 25}
-        ).execute()
-
-        grade_order = ["Raw", "PSA 9", "PSA 10", "BGS 9", "BGS 9.5", "BGS 10",
-                       "SGC 9", "SGC 9.5", "SGC 10", "CGC 9", "CGC 9.5", "CGC 10"]
-
-        seen = {}
-        for row in (result.data or []):
-            g = (row.get("grade") or "").strip()
-            if not g or g in seen:
-                continue
-            seen[g] = row.get("current_price")
-
-        def sort_key(g):
-            try: return grade_order.index(g)
-            except ValueError: return len(grade_order)
-
-        choices = []
-        for g in sorted(seen.keys(), key=sort_key):
-            price = seen[g]
-            price_str = f" — ${float(price):.0f}" if price else ""
-            label = f"{g}{price_str}"
-            choices.append(app_commands.Choice(name=label, value=g))
             if len(choices) >= 25:
                 break
         return choices
     except Exception as e:
-        print(f"[ERROR] eval_grade_autocomplete: {e}")
+        print(f"[ERROR] player_autocomplete: {e}")
         return []
 
 
-@evaluate.autocomplete("variation")
-async def eval_variation_autocomplete(interaction: discord.Interaction, current: str):
+@grade.autocomplete("set_name")
+async def set_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        player_val = interaction.namespace.player or ""
-        set_val    = interaction.namespace.set_name or ""
-        result = supabase.rpc(
-            "search_variations",
-            {"p_player": player_val, "p_set": set_val, "p_search": current or "", "p_limit": 25}
-        ).execute()
+        player_val = interaction.namespace.player
 
+        # Run two passes: one on player_name, one on canonical_name.
+        # This ensures that if user picked "Deoxys VMAX" but the Crown Zenith card
+        # lives under player_name="Deoxys", it still surfaces in set results.
+        from collections import Counter
+
+        def run_set_query(player_field: str):
+            query = supabase.table("mv_grade_premiums").select("set_name, set_year, raw_price, raw_sale_count_30d")
+            if player_val and len(player_val) >= 2:
+                query = query.ilike(player_field, f"%{player_val}%")
+            if current and len(current) >= 1:
+                query = query.ilike("set_name", f"%{current}%")
+            return query.order("raw_sale_count_30d", desc=True).limit(100).execute()
+
+        result = run_set_query("player_name")
+        rows = list(result.data)
+
+        # Always supplement with canonical_name search
+        result2 = run_set_query("canonical_name")
+        existing_sets = {r["set_name"] for r in rows}
+        for r in result2.data:
+            if r["set_name"] not in existing_sets:
+                rows.append(r)
+                existing_sets.add(r["set_name"])
+
+        set_counts = Counter(r["set_name"] for r in rows)
+        set_price = {}
+        for r in rows:
+            s = r["set_name"]
+            if s not in set_price:
+                set_price[s] = (r.get("raw_price"), r.get("set_year"))
+
+        seen = set()
         choices = []
-        for row in (result.data or []):
-            val = (row.get("variation") or "").strip()
-            if not val:
+        for r in rows:
+            val = r["set_name"]
+            if val in seen:
                 continue
-            price = row.get("current_price")
-            price_str = f" — ${float(price):.0f}" if price else ""
-            label = f"{val}{price_str}"
+            seen.add(val)
+            year = set_price[val][1]
+            raw = set_price[val][0]
+            price_str = f" — ${float(raw):.0f} raw" if (raw and set_counts[val] == 1) else ""
+            label = f"{val} ({year}){price_str}"
             if len(label) > 100:
                 label = label[:97] + "..."
             choices.append(app_commands.Choice(name=label, value=val))
@@ -627,12 +575,97 @@ async def eval_variation_autocomplete(interaction: discord.Interaction, current:
                 break
         return choices
     except Exception as e:
-        print(f"[ERROR] eval_variation_autocomplete: {e}")
+        print(f"[ERROR] set_autocomplete: {e}")
+        return []
+
+
+@grade.autocomplete("variation")
+async def variation_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        player_val = interaction.namespace.player
+        set_val    = interaction.namespace.set_name
+        query = (
+            supabase.table("mv_grade_premiums")
+            .select("variation, raw_price, psa10_price, raw_sale_count_30d")
+            .not_.is_("variation", "null")
+        )
+        if player_val and len(player_val) >= 2:
+            query = query.ilike("player_name", f"%{player_val}%")
+        if set_val and len(set_val) >= 2:
+            query = query.ilike("set_name", f"%{set_val}%")
+        if current and len(current) >= 1:
+            query = query.ilike("variation", f"%{current}%")
+
+        # Sort: Base first by sale count, then all other parallels by sale count.
+        # This keeps base cards at the top since most users search for base.
+        query = query.order("raw_sale_count_30d", desc=True)
+        result = query.limit(100).execute()
+
+        seen = set()
+        base_choices = []
+        other_choices = []
+        for row in result.data:
+            val = (row["variation"] or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            raw = row.get("raw_price")
+            psa10 = row.get("psa10_price")
+            price_str = f" — ${raw:.0f} raw" if raw else ""
+            psa10_str = f" · ${psa10:.0f} PSA 10" if psa10 else ""
+            label = f"{val}{price_str}{psa10_str}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            choice = app_commands.Choice(name=label, value=val)
+            if val.lower() == "base":
+                base_choices.append(choice)
+            else:
+                other_choices.append(choice)
+
+        choices = (base_choices + other_choices)[:25]
+        return choices
+    except Exception as e:
+        print(f"[ERROR] variation_autocomplete: {e}")
+        return []
+
+
+@grade.autocomplete("insert_set")
+async def insert_set_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        player_val = interaction.namespace.player
+        set_val    = interaction.namespace.set_name
+        query = (
+            supabase.table("mv_grade_premiums")
+            .select("insert_set")
+            .not_.is_("insert_set", "null")
+        )
+        if player_val and len(player_val) >= 2:
+            query = query.ilike("player_name", f"%{player_val}%")
+        if set_val and len(set_val) >= 2:
+            query = query.ilike("set_name", f"%{set_val}%")
+        if current and len(current) >= 1:
+            query = query.ilike("insert_set", f"%{current}%")
+        query = query.order("raw_sale_count_30d", desc=True)
+        result = query.limit(100).execute()
+
+        seen = set()
+        choices = []
+        for row in result.data:
+            val = (row["insert_set"] or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            choices.append(app_commands.Choice(name=val, value=val))
+            if len(choices) >= 25:
+                break
+        return choices
+    except Exception as e:
+        print(f"[ERROR] insert_set_autocomplete: {e}")
         return []
 
 
 # ===========================================================================
-# RUN
+# Run
 # ===========================================================================
 
 client.run(TOKEN)
