@@ -60,44 +60,54 @@ def calc_net(sale_price, fee_pct, fixed_fee, purchase_price, grading_cost):
 # GRADE DATA
 # ===========================================================================
 
+# Prices and turnaround times as of mid 2026.
+# PSA Value tiers (Value Bulk, Value, Value Plus, Value Max) paused June 2, 2026
+# due to ~10M card backlog. Cheapest open PSA tier is Regular at $79.99.
+# BGS Base tier turnaround extended to 75+ days (Jan 2026).
+# SGC turnaround extended to ~40-50 days post-PSA pause demand surge.
+# CGC Bulk tier running ~120 business days.
+# Verify all current availability at each grader's website before submitting.
+
 GRADERS = {
     "PSA": {
-        "default_tier": "Value", "default_cost": 27.99,
+        "default_tier": "Value", "default_cost": 32.99,
         "tiers": {
-            "Value":         (27.99,  "~95 business days", 500,   "Cheapest no-membership tier"),
-            "Value Plus":    (44.99,  "~40 business days", 500,   "Faster, same value cap"),
-            "Value Max":     (59.99,  "~30 business days", 1000,  "Higher value cap"),
-            "Regular":       (74.99,  "~20 business days", 1500,  "Most common mid-tier"),
-            "Express":       (160.00, "~10 business days", 2999,  "Fast turnaround"),
-            "Super Express": (300.00, "~5 business days",  4999,  "Highest priority"),
+            "Value Bulk":    (24.99,  "~75 business days",  500,   "Members only ($149/yr), 50-card min — PAUSED June 2"),
+            "Value":         (32.99,  "~75 business days",  500,   "Cheapest no-membership tier — PAUSED June 2"),
+            "Value Plus":    (49.99,  "~45 business days",  500,   "Faster, same value cap — PAUSED June 2"),
+            "Value Max":     (64.99,  "~35 business days",  1000,  "Higher value cap — PAUSED June 2"),
+            "Regular":       (79.99,  "~25 business days",  1500,  "Cheapest open tier as of June 2"),
+            "Express":       (149.00, "~15 business days",  2500,  "Fast turnaround"),
+            "Super Express": (299.00, "~7 business days",   5000,  "Fastest priority"),
         },
         "emoji": "🟦",
     },
     "BGS": {
-        "default_tier": "Base", "default_cost": 14.95,
+        "default_tier": "Base", "default_cost": 19.00,
         "tiers": {
-            "Base":     (14.95,  "~75 days", None, "Sub-grades included free."),
-            "Standard": (34.95,  "~45 days", None, "Best balance of cost and speed"),
-            "Express":  (79.95,  "~15 days", None, "Fast turnaround"),
-            "Priority": (124.95, "~5 days",  None, "Fastest BGS service"),
+            "Base":     (19.00,  "75+ business days", None, "Sub-grades included free. Turnaround extended Jan 2026"),
+            "Standard": (30.00,  "~45 business days", None, "Best balance of cost and speed"),
+            "Express":  (80.00,  "~15 business days", None, "Fast turnaround"),
+            "Priority": (150.00, "~5 business days",  None, "Fastest BGS service"),
         },
         "emoji": "⚫",
     },
     "SGC": {
-        "default_tier": "Standard", "default_cost": 15.00,
+        "default_tier": "Standard", "default_cost": 20.00,
         "tiers": {
-            "Standard":  (15.00, "~15-20 business days", 1500, "Best value for speed."),
-            "Immediate": (40.00, "~1-2 business days",   1500, "Fastest turnaround in the industry"),
+            "Standard": (20.00, "~40-50 business days", 1500, "No membership or minimum required. Turnaround extended post-PSA pause"),
+            "Express":  (60.00, "~5-10 business days",  1500, "Fastest SGC option"),
         },
         "emoji": "🟤",
     },
     "CGC": {
-        "default_tier": "Economy", "default_cost": 17.00,
+        "default_tier": "Economy", "default_cost": 18.00,
         "tiers": {
-            "Bulk":        (14.00,  "~80 days", 500,   "25-card minimum required"),
-            "Economy":     (17.00,  "~40 days", 1000,  "No minimum. Best single-card budget option."),
-            "Express":     (50.00,  "~10 days", 3000,  "Fast and mid-range"),
-            "WalkThrough": (150.00, "~2 days",  10000, "Fastest CGC service"),
+            "Bulk":        (15.00,  "~120 business days",  500,   "25-card minimum required. Heavily backlogged"),
+            "Economy":     (18.00,  "~65 business days",   1000,  "No minimum. Budget single-card option."),
+            "Standard":    (55.00,  "20-45 business days", 3000,  "Mid-range speed"),
+            "Express":     (100.00, "~10 business days",   3000,  "Fast turnaround"),
+            "WalkThrough": (300.00, "~2 business days",    10000, "Fastest CGC service"),
         },
         "emoji": "🟡",
     },
@@ -376,13 +386,35 @@ async def grade(
 
     for gk, gd in GRADERS.items():
         tier_name = override_tier if (override_tier and override_tier in gd["tiers"]) else gd["default_tier"]
-        cost, turnaround, _, _ = gd["tiers"][tier_name]
+        cost, turnaround, _, tier_note = gd["tiers"][tier_name]
         rec_tag = " ⭐" if gk == rec_grader else ""
 
+        # Build pause/delay warning per grader
+        if gk == "PSA" and tier_name in ("Value Bulk", "Value", "Value Plus", "Value Max"):
+            pause_warning = "\n⚠️ **Value tiers PAUSED as of June 2** — figures below are for when tiers reopen"
+        elif gk == "SGC":
+            pause_warning = "\n⚠️ Turnaround extended to ~40–50 days (post-PSA pause demand surge)"
+        elif gk == "BGS" and tier_name == "Base":
+            pause_warning = "\n⚠️ Base tier turnaround extended to 75+ days (Jan 2026)"
+        elif gk == "CGC" and tier_name == "Bulk":
+            pause_warning = "\n⚠️ Bulk tier heavily backlogged (~120 business days)"
+        else:
+            pause_warning = ""
+
         if gk == "PSA":
-            uplift = (psa9 - raw - cost) if (psa9 and raw) else None
-            price_str = (f"PSA 9: **{format_currency(psa9)}** · PSA 10: **{format_currency(psa10)}**\n"
-                         f"Uplift (PSA 9 vs raw): **{format_currency(uplift)}**")
+            reg_cost      = GRADERS["PSA"]["tiers"]["Regular"][0]
+            uplift_9      = (psa9  - raw - cost)     if (psa9  and raw) else None
+            uplift_10     = (psa10 - raw - cost)     if (psa10 and raw) else None
+            uplift_9_reg  = (psa9  - raw - reg_cost) if (psa9  and raw) else None
+            uplift_10_reg = (psa10 - raw - reg_cost) if (psa10 and raw) else None
+            price_str = (
+                f"PSA 9: **{format_currency(psa9)}** · PSA 10: **{format_currency(psa10)}**\n"
+                f"Uplift PSA 9 (at ${cost:.2f}, when reopened): **{format_currency(uplift_9)}**\n"
+                f"Uplift PSA 10 (at ${cost:.2f}, when reopened): **{format_currency(uplift_10)}**\n"
+                f"—\n"
+                f"Regular (${reg_cost:.2f}, ~25 days — open now):\n"
+                f"  PSA 9 uplift: **{format_currency(uplift_9_reg)}** · PSA 10 uplift: **{format_currency(uplift_10_reg)}**"
+            )
         elif gk == "BGS":
             if any([bgs9, bgs95, bgs10]):
                 best = bgs95 or bgs9 or bgs10
@@ -417,14 +449,15 @@ async def grade(
 
         embed.add_field(
             name=f"{gd['emoji']} {gk}{rec_tag}",
-            value=f"Cost: **${cost:.2f}** · {turnaround}\n{price_str}",
+            value=f"Cost: **${cost:.2f}** · {turnaround}{pause_warning}\n{price_str}",
             inline=True,
         )
 
     embed.add_field(
         name="💳 Membership Savings",
         value=(
-            "**PSA:** Collectors Club $149/yr → ~$21.99/card bulk\n"
+            "**PSA:** Collectors Club $149/yr → Value Bulk $24.99/card\n"
+            "  (50-card min, members only — currently **PAUSED**)\n"
             "**BGS:** No membership required\n"
             "**SGC:** No membership required\n"
             "**CGC:** Free acct full price · $25+/yr → 10-20% off"
@@ -434,7 +467,7 @@ async def grade(
     if not override_tier:
         embed.add_field(name="💡 Tip", value="Re-run with `override_tier` (e.g. `Express`) to see costs for faster tiers.", inline=False)
 
-    embed.set_footer(text="Prices from DB (30-day median sales). Grading costs as of early 2026 — verify on grader websites before submitting.")
+    embed.set_footer(text="Prices from DB (30-day median sales). Grading costs as of mid 2026 — verify on grader websites before submitting. ⚠️ Industry-wide backlog: PSA Value tiers paused June 2, all graders experiencing extended turnaround times.")
     await interaction.followup.send(embed=embed)
 
 
