@@ -201,7 +201,7 @@ async def sell(interaction: discord.Interaction, sale_price: float, purchase_pri
 
 GRADE_SELECT = (
     "card_id, player_name, card_number, set_name, variation, insert_set, "
-    "canonical_name, is_rookie, sport, "
+    "canonical_name, is_rookie, sport, image_url, "
     "raw_price, raw_sale_count_30d, "
     "psa9_price, psa10_price, grading_score, "
     "raw_to_psa9_mult, raw_to_psa10_mult, psa9_to_psa10_mult, "
@@ -468,6 +468,10 @@ async def grade(
         embed.add_field(name="💡 Tip", value="Re-run with `override_tier` (e.g. `Express`) to see costs for faster tiers.", inline=False)
 
     embed.set_footer(text="Prices from DB (30-day median sales). Grading costs as of mid 2026 — verify on grader websites before submitting. ⚠️ Industry-wide backlog: PSA Value tiers paused June 2, all graders experiencing extended turnaround times.")
+    image_url = card.get("image_url")
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+
     await interaction.followup.send(embed=embed)
 
 
