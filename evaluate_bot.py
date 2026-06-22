@@ -337,7 +337,7 @@ async def evaluate(
     icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌"}.get(verdict, "")
     # Data confidence warning
     total_90d_sales = fv(card.get("sale_count_90d")) or 0
-    low_data = (fv(card.get("current_price")) or 0) < 5 or total_90d_sales < 3
+    low_data = total_90d_sales < 3
     low_data_warning = "\n\n⚠️ _Limited sales data for this card — treat this result with caution._" if low_data else ""
     embed = discord.Embed(
         title=f"{icon} {verdict} — {card_name}",
