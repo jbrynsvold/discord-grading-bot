@@ -64,7 +64,7 @@ def compute_giga_score(m: dict) -> tuple[int, dict]:
         return 0
 
     base_90d = (sale_90d / 3.0) if has_90d and sale_90d else None
-    r1 = (sale_30d / base_90d)      if base_90d            else None
+    r1 = (sale_30d / base_90d)       if base_90d            else None
     r2 = ((sale_3d * 10) / sale_30d) if sale_30d > 0        else None
     r3 = ((sale_3d * 30) / sale_90d) if has_90d and sale_90d else None
     c3 = max(vel_pts(r1), vel_pts(r2), vel_pts(r3))
@@ -139,21 +139,18 @@ def build_fail_reason(failed, score, card, trend_pct=None):
     sale_30d   = int(card.get("sale_count_30d") or 0)
     pct_range  = float(card.get("pct_of_52w_range") or 0)
 
-    # ── HR3 only (trend/decline) ──────────────────────────────────────────
     if failed_names == {"HR3 trend"}:
         if sale_30d >= 20:
             return "Lots of selling pressure right now — volume is there but the price is heading down. Wait for the trend to reverse."
         return "The price is in a meaningful decline right now. We avoid flagging cards that are actively falling — the setup needs to stabilize first."
 
-    # ── HR2 only (velocity) ───────────────────────────────────────────────
     if failed_names == {"HR2 velocity"}:
         if pct_range > 60:
-            return f"Volume has dropped off and the card is near its yearly high. Low conviction at an expensive price — not a good combination."
+            return "Volume has dropped off and the card is near its yearly high. Low conviction at an expensive price — not a good combination."
         if pct_range <= 20:
-            return f"The price is near its yearly low, which is attractive, but trading has slowed way down. Hard to call a setup without consistent buyer interest."
-        return f"Trading volume is below where we need it. The card hasn't done much lately — check back if activity picks up."
+            return "The price is near its yearly low, which is attractive, but trading has slowed way down. Hard to call a setup without consistent buyer interest."
+        return "Trading volume is below where we need it. The card hasn't done much lately — check back if activity picks up."
 
-    # ── HR4 only (recency) ────────────────────────────────────────────────
     if failed_names == {"HR4 recency"}:
         if days_since <= 30:
             return f"The card hasn't sold in {days_since} days. Could be a temporary lull — worth checking back in a week or two."
@@ -161,39 +158,35 @@ def build_fail_reason(failed, score, card, trend_pct=None):
             return f"Price is near its yearly low but the card has gone completely quiet — {days_since} days without a sale. The setup could be interesting if it wakes up."
         return f"No sales in {days_since} days. The market has lost interest for now. Re-evaluate if it starts trading again."
 
-    # ── HR2 + HR4 ─────────────────────────────────────────────────────────
     if failed_names == {"HR2 velocity", "HR4 recency"}:
         return f"This card has gone quiet — {sale_30d} sales in 30 days and the last one was {days_since} days ago. We need to see active trading before we can evaluate the setup."
 
-    # ── HR3 + HR4 ─────────────────────────────────────────────────────────
     if failed_names == {"HR3 trend", "HR4 recency"}:
         return f"Price has been declining and the card hasn't sold in {days_since} days. Two red flags at once — not a setup we'd act on right now."
 
-    # ── HR2 + HR3 ─────────────────────────────────────────────────────────
     if failed_names == {"HR2 velocity", "HR3 trend"}:
         tp = trend_pct or 0
         if tp < -20 and sale_30d < 5:
             return "Volume has collapsed and the price is in a real decline. This card is in a rough spot — wait for both to stabilize."
         return "Volume is thin and price is drifting down. Neither signal is extreme, but together they make this a pass for now."
 
-    # ── All 3 fail ────────────────────────────────────────────────────────
     if len(failed) >= 3:
         return "This card isn't trading actively, volume is thin, and the price trend is negative. None of our baseline criteria are met right now."
 
-    # ── No rule failures — low score ──────────────────────────────────────
     if not failed:
         tp = trend_pct or 0
         if pct_range <= 20 and tp > 5:
-            return f"Price is near its yearly low and starting to move — but volume isn't there yet to confirm the setup. Worth watching."
+            return "Price is near its yearly low and starting to move — but volume isn't there yet to confirm the setup. Worth watching."
         if pct_range <= 20:
-            return f"The price is near its yearly low which is encouraging, but trading activity is too thin to call a setup. Could be worth watching if volume picks up."
+            return "The price is near its yearly low which is encouraging, but trading activity is too thin to call a setup. Could be worth watching if volume picks up."
         if pct_range <= 45:
-            return f"Nothing stands out here. The card is trading in the middle of its yearly range with no strong momentum in either direction."
+            return "Nothing stands out here. The card is trading in the middle of its yearly range with no strong momentum in either direction."
         if pct_range <= 60:
             return f"The card has moved up from its low but hasn't broken out. At {pct_range:.0f}% of its range with a score of {score}/100, the setup isn't compelling right now."
-        # 60-80% — upper range, not a buy, Sell handles 80%+
         return f"The card is in the upper portion of its yearly range at {pct_range:.0f}%. Not an ideal entry — we'd rather buy this closer to its low."
+
     return "Doesn't meet our criteria right now."
+
 
 def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct=None):
     all_pass = all(r["passed"] for r in rules)
@@ -208,7 +201,7 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct
         return "Skip", 0x888780, build_fail_reason(failed, score, card, trend_pct)
     if score >= 65:
         if pct_of_range is not None and pct_of_range <= 20 and (trend_pct or 0) > 5:
-            return "Buy", 0x1D9E75, f"Strong setup. Price near its yearly low, volume is healthy, and momentum is building. All criteria met."
+            return "Buy", 0x1D9E75, "Strong setup. Price near its yearly low, volume is healthy, and momentum is building. All criteria met."
         if pct_of_range is not None and (sale_30d := int(card.get("sale_count_30d") or 0)) >= 20 and pct_of_range <= 60:
             return "Buy", 0x1D9E75, f"High conviction setup — strong volume, all rules pass, and still room to run at {pct_of_range:.0f}% of its range."
         range_str = f"sitting at just {pct_of_range:.0f}% of its yearly range" if pct_of_range is not None else "near its yearly low"
@@ -220,6 +213,7 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct
             return "Watch", 0xEF9F27, f"Momentum is building and all checks pass, but the score is {score}/100 — we look for 65+ to call a buy. Could get there if the trend continues."
         return "Watch", 0xEF9F27, f"Passes our activity checks with a score of {score}/100. Not quite a buy yet, but the setup is developing. Watch for a stronger signal."
     return "Skip", 0x888780, build_fail_reason(failed, score, card, trend_pct)
+
 
 # ===========================================================================
 # BOT SETUP
@@ -291,7 +285,7 @@ async def evaluate(
             lines.append(f"• **#{num}** {var}{price_str}  _{canon}_")
 
         embed = discord.Embed(
-            title=f"🔎 Multiple matches — add a card number",
+            title="🔎 Multiple matches — add a card number",
             description=(
                 f"Found **{len(result.data)} cards** matching **{player}** · {set_name} · {variation} · {grade}.\n"
                 f"Re-run `/evaluate` and fill in the **card_number** field to get the right one:\n\n"
@@ -300,129 +294,139 @@ async def evaluate(
             color=0x5865F2,
         )
         embed.set_footer(text="Copy the # from the list above into the card_number field.")
-        
         await interaction.followup.send(embed=embed)
         return
 
     # -----------------------------------------------------------------------
     # SINGLE MATCH — full evaluation
     # -----------------------------------------------------------------------
+    print(f"[DEBUG] RPC returned {len(result.data)} rows")
     card = result.data[0]
     card_id    = card.get("card_id")
     card_grade = card.get("grade", grade)
 
-    score, breakdown = compute_giga_score(card)
-    rules = check_hard_rules(card)
-
-    watchlist_entry = None
     try:
-        r = supabase.rpc("get_watchlist_entry", {"p_card_id": card_id, "p_grade": card_grade}).execute()
-        if r.data:
-            watchlist_entry = r.data[0]
-    except Exception:
-        pass
+        score, breakdown = compute_giga_score(card)
+        rules = check_hard_rules(card)
 
-    already_spiked = False
-    spike_info = None
-    try:
-        r = supabase.rpc("get_spike_entry", {"p_card_id": card_id, "p_grade": card_grade}).execute()
-        if r.data:
-            s = r.data[0]
-            spike_date = s.get("spike_start_date")
-            if spike_date:
-                from datetime import datetime
-                days_ago = (date.today() - datetime.strptime(str(spike_date), "%Y-%m-%d").date()).days
-                if days_ago <= 60 and s.get("resolution", "") not in ("faded", "resolved"):
-                    already_spiked = True
-                    spike_info = s
-    except Exception:
-        pass
+        watchlist_entry = None
+        try:
+            r = supabase.rpc("get_watchlist_entry", {"p_card_id": card_id, "p_grade": card_grade}).execute()
+            if r.data:
+                watchlist_entry = r.data[0]
+        except Exception:
+            pass
 
-    card_name     = card.get("player_name", player)
-    set_display   = card.get("set_name", set_name)
-    card_num      = card.get("card_number")
-    variation_val = card.get("variation")
-    insert_val    = card.get("insert_set")
-    is_rookie     = card.get("is_rookie", False)
+        already_spiked = False
+        spike_info = None
+        try:
+            r = supabase.rpc("get_spike_entry", {"p_card_id": card_id, "p_grade": card_grade}).execute()
+            if r.data:
+                s = r.data[0]
+                spike_date = s.get("spike_start_date")
+                if spike_date:
+                    from datetime import datetime
+                    days_ago = (date.today() - datetime.strptime(str(spike_date), "%Y-%m-%d").date()).days
+                    if days_ago <= 60 and s.get("resolution", "") not in ("faded", "resolved"):
+                        already_spiked = True
+                        spike_info = s
+        except Exception:
+            pass
 
-    subtitle = set_display
-    if card_num:      subtitle += f" #{card_num}"
-    if variation_val: subtitle += f" · {variation_val}"
-    if insert_val:    subtitle += f" · {insert_val}"
-    subtitle += f" · {card_grade}"
-    if is_rookie:     subtitle += " · 🌟 RC"
+        card_name     = card.get("player_name", player)
+        set_display   = card.get("set_name", set_name)
+        card_num      = card.get("card_number")
+        variation_val = card.get("variation")
+        insert_val    = card.get("insert_set")
+        is_rookie     = card.get("is_rookie", False)
 
-    current  = fv(card.get("current_price"))
-    avg_30d  = fv(card.get("avg_price_30d"))
-    avg_90d  = fv(card.get("avg_price_90d"))
-    low_52w  = fv(card.get("low_52w"))
-    high_52w = fv(card.get("high_52w"))
-    sale_30d = card.get("sale_count_30d") or 0
+        subtitle = set_display
+        if card_num:      subtitle += f" #{card_num}"
+        if variation_val: subtitle += f" · {variation_val}"
+        if insert_val:    subtitle += f" · {insert_val}"
+        subtitle += f" · {card_grade}"
+        if is_rookie:     subtitle += " · 🌟 RC"
 
-    trend_str = "N/A"
-    if current and avg_30d and avg_30d > 0:
-        trend_str = f"{((current - avg_30d) / avg_30d) * 100:+.1f}%"
+        current  = fv(card.get("current_price"))
+        avg_30d  = fv(card.get("avg_price_30d"))
+        avg_90d  = fv(card.get("avg_price_90d"))
+        low_52w  = fv(card.get("low_52w"))
+        high_52w = fv(card.get("high_52w"))
+        sale_30d = card.get("sale_count_30d") or 0
 
-    pct_range = fv(card.get("pct_of_52w_range"))
+        trend_str = "N/A"
+        if current and avg_30d and avg_30d > 0:
+            trend_str = f"{((current - avg_30d) / avg_30d) * 100:+.1f}%"
 
-    trend_pct_val = None
-    price_ref = fv(card.get("avg_price_3d")) or fv(card.get("current_price"))
-    if price_ref and avg_30d and avg_30d > 0:
-        trend_pct_val = ((price_ref - avg_30d) / avg_30d) * 100
+        pct_range = fv(card.get("pct_of_52w_range"))
 
-    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card, trend_pct_val)
+        trend_pct_val = None
+        price_ref = fv(card.get("avg_price_3d")) or fv(card.get("current_price"))
+        if price_ref and avg_30d and avg_30d > 0:
+            trend_pct_val = ((price_ref - avg_30d) / avg_30d) * 100
 
-    rule_plain = {
-        "HR2 velocity": "Trading volume is too low right now",
-        "HR4 recency":  f"Hasn't sold in {int(fv(card.get('days_since_last_sale')) or 0)} days — market gone quiet",
-    }
-    flag_lines  = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in rules if not r["passed"] and r["name"] in rule_plain]
-    failed_rules = [r for r in rules if not r["passed"]]
-    if failed_rules and score >= 65:
-        score_label = "Strong setup — blocked by rule"
-    elif failed_rules and score >= 55:
-        score_label = "Average setup — blocked by rule"
-    else:
-        score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
-    icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌", "Sell": "🔴"}.get(verdict, "")
-    # Data confidence warning
-    total_90d_sales = fv(card.get("sale_count_90d")) or 0
-    low_data = total_90d_sales < 3
-    low_data_warning = "\n\n⚠️ _Limited sales data for this card — treat this result with caution._" if low_data else ""
-    embed = discord.Embed(
-        title=f"{icon} {verdict} — {card_name}",
-        description=(
-            f"{subtitle}\n\n_{reasoning}_"
-            + (f"\n\n" + "\n".join(flag_lines) if flag_lines else "")
-            + low_data_warning
-            + (f"\n\n📋 **On GIGA watchlist since {watchlist_entry.get('flagged_date')}**" if watchlist_entry else "")
-        ),
-        color=color,
-    )
-    if spike_info:
-        sp = spike_info
-        embed.add_field(name="⚠️ Already spiked",
-                        value=f"Peaked at {fmt(sp.get('peak_spike_price'))} (+{sp.get('price_change_pct', 0):.0f}%) on {sp.get('spike_start_date')}. Don't chase it.",
-                        inline=False)
+        verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card, trend_pct_val)
 
-    embed.add_field(name="Current price", value=f"**{fmt(current)}**", inline=True)
-    embed.add_field(name="30d avg",       value=fmt(avg_30d),           inline=True)
-    embed.add_field(name="90d avg",       value=fmt(avg_90d),           inline=True)
-    embed.add_field(name="Year range",    value=f"{fmt(low_52w)} – {fmt(high_52w)}", inline=True)
-    embed.add_field(name="Sales / 30d",   value=str(sale_30d),          inline=True)
-    embed.add_field(name="Trend",         value=trend_str,              inline=True)
-    embed.add_field(name="GIGA Score",    value=f"**{score} / 100** — {score_label}", inline=False)
-    embed.set_footer(text="GIGA · Not financial advice")
+        rule_plain = {
+            "HR2 velocity": "Trading volume is too low right now",
+            "HR4 recency":  f"Hasn't sold in {int(fv(card.get('days_since_last_sale')) or 0)} days — market gone quiet",
+        }
+        flag_lines   = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in rules if not r["passed"] and r["name"] in rule_plain]
+        failed_rules = [r for r in rules if not r["passed"]]
+        if failed_rules and score >= 65:
+            score_label = "Strong setup — blocked by rule"
+        elif failed_rules and score >= 55:
+            score_label = "Average setup — blocked by rule"
+        else:
+            score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
 
-    image_url = card.get("image_url")
-    if image_url:
-        embed.set_thumbnail(url=image_url)
+        icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌", "Sell": "🔴"}.get(verdict, "")
 
-    await interaction.followup.send(embed=embed)
+        total_90d_sales = fv(card.get("sale_count_90d")) or 0
+        low_data = total_90d_sales < 3
+        low_data_warning = "\n\n⚠️ _Limited sales data for this card — treat this result with caution._" if low_data else ""
+
+        embed = discord.Embed(
+            title=f"{icon} {verdict} — {card_name}",
+            description=(
+                f"{subtitle}\n\n_{reasoning}_"
+                + (f"\n\n" + "\n".join(flag_lines) if flag_lines else "")
+                + low_data_warning
+                + (f"\n\n📋 **On GIGA watchlist since {watchlist_entry.get('flagged_date')}**" if watchlist_entry else "")
+            ),
+            color=color,
+        )
+
+        if spike_info:
+            sp = spike_info
+            embed.add_field(name="⚠️ Already spiked",
+                            value=f"Peaked at {fmt(sp.get('peak_spike_price'))} (+{sp.get('price_change_pct', 0):.0f}%) on {sp.get('spike_start_date')}. Don't chase it.",
+                            inline=False)
+
+        embed.add_field(name="Current price", value=f"**{fmt(current)}**", inline=True)
+        embed.add_field(name="30d avg",       value=fmt(avg_30d),           inline=True)
+        embed.add_field(name="90d avg",       value=fmt(avg_90d),           inline=True)
+        embed.add_field(name="Year range",    value=f"{fmt(low_52w)} – {fmt(high_52w)}", inline=True)
+        embed.add_field(name="Sales / 30d",   value=str(sale_30d),          inline=True)
+        embed.add_field(name="Trend",         value=trend_str,              inline=True)
+        embed.add_field(name="GIGA Score",    value=f"**{score} / 100** — {score_label}", inline=False)
+        embed.set_footer(text="GIGA · Not financial advice")
+
+        image_url = card.get("image_url")
+        if image_url:
+            embed.set_thumbnail(url=image_url)
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] embed build crashed: {e}")
+        print(traceback.format_exc())
+        await interaction.followup.send(f"[ERROR] Something went wrong: {e}")
 
 
 # ===========================================================================
-# AUTOCOMPLETE — all queries against public.mv_card_metrics
+# AUTOCOMPLETE — all queries against sports.mv_card_metrics
 # ===========================================================================
 
 @evaluate.autocomplete("player")
@@ -498,11 +502,6 @@ async def eval_grade_autocomplete(interaction: discord.Interaction, current: str
 
 @evaluate.autocomplete("variation")
 async def eval_variation_autocomplete(interaction: discord.Interaction, current: str):
-    """
-    Queries public.mv_card_metrics directly — no schema split.
-    Passes card_number when available to pre-filter.
-    Shows price range per variation.
-    """
     try:
         player_val      = interaction.namespace.player or ""
         set_val         = interaction.namespace.set_name or ""
@@ -536,10 +535,10 @@ async def eval_variation_autocomplete(interaction: discord.Interaction, current:
     except Exception as e:
         print(f"[ERROR] eval_variation_autocomplete: {e}")
         return []
-         
- 
+
+
 # ===========================================================================
 # RUN
 # ===========================================================================
- 
+
 client.run(TOKEN)
