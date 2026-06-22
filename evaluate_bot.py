@@ -191,17 +191,8 @@ def build_fail_reason(failed, score, card, trend_pct=None):
             return f"Nothing stands out here. The card is trading in the middle of its yearly range with no strong momentum in either direction."
         if pct_range <= 60:
             return f"The card has moved up from its low but hasn't broken out. At {pct_range:.0f}% of its range with a score of {score}/100, the setup isn't compelling right now."
-        if pct_range <= 80:
-            if tp > 10:
-                return f"Price is near its yearly high and still climbing. The setup has already played out — we'd rather catch this earlier. Watch for a pullback."
-            if tp < -5:
-                return f"The card ran up near its yearly high and is now pulling back. Possible re-entry later if it finds support, but too early to call."
-            return f"The card is trading near the top of its yearly range but the price has been stable — not a breakout, just historically expensive. Not an ideal entry."
-        # 80-110% handled here, Sell handles 110+
-        if tp > 10:
-            return f"Price is near its yearly high and still climbing — the setup has already played out. Watch for a pullback before considering an entry."
-        return f"Trading near the top of its yearly range at {pct_range:.0f}%. Not an ideal entry point — we prefer to flag cards earlier in their setup."
-
+        # 60-80% — upper range, not a buy, Sell handles 80%+
+        return f"The card is in the upper portion of its yearly range at {pct_range:.0f}%. Not an ideal entry — we'd rather buy this closer to its low."
     return "Doesn't meet our criteria right now."
 
 def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct=None):
@@ -211,8 +202,8 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct
 
     if already_spiked:
         return "Avoid", 0xED4245, "This card has already made its move. If you're holding — consider taking profits now. If you're looking to buy — the window has passed."
-    if pct_of_range is not None and pct_of_range > 110:
-        return "Sell", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is running hot. If you're holding — this is a good exit point. If you're looking to buy — wait for it to cool off before entering."
+    if pct_of_range is not None and pct_of_range > 80:
+        return "Sell", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is near its yearly high. If you're holding — this is a reasonable exit point. If you're looking to buy — wait for a pullback before entering."
     if not all_pass:
         return "Skip", 0x888780, build_fail_reason(failed, score, card, trend_pct)
     if score >= 65:
