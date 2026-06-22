@@ -258,6 +258,7 @@ async def evaluate(
     await interaction.response.defer(ephemeral=True)
 
     try:
+        print(f"[DEBUG] evaluate_card: player={player!r} set={set_name!r} grade={grade!r} variation={variation!r} card_number={card_number!r}")
         result = supabase.rpc("evaluate_card", {
             "p_player":      player,
             "p_set":         set_name,
