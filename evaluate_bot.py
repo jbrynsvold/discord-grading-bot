@@ -166,17 +166,17 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None):
     card     = card or {}
 
     if already_spiked:
-        return "Sell / Pass", 0xED4245, "This card has already made its move. The window has passed — buying now means chasing."
+        return "Avoid", 0xED4245, "This card has already made its move. The window has passed — buying now means chasing."
     if pct_of_range is not None and pct_of_range > 110:
-        return "Sell / Pass", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is trading well above where it's historically topped out. Not a good entry."
+        return "Avoid", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is trading well above where it's historically topped out. Not a good entry."
     if not all_pass:
-        return "Pass", 0x888780, build_fail_reason(failed, score, card)
+        return "Skip", 0x888780, build_fail_reason(failed, score, card)
     if score >= 65:
         range_str = f"sitting at just {pct_of_range:.0f}% of its yearly range" if pct_of_range is not None else "near its yearly low"
         return "Buy", 0x1D9E75, f"Everything checks out. Active trading, healthy volume, and {range_str} — this is the kind of setup we look for."
     if score >= 55:
-        return "Hold", 0xEF9F27, f"Passes our activity checks but the setup isn't quite there yet — scoring {score}/100. Worth keeping an eye on but not a strong entry right now."
-    return "Pass", 0x888780, build_fail_reason(failed, score, card)
+        return "Watch", 0xEF9F27, f"Passes our activity checks but the setup isn't quite there yet — scoring {score}/100. Worth keeping an eye on but not a strong entry right now."
+    return "Skip", 0x888780, build_fail_reason(failed, score, card)
 
 
 # ===========================================================================
@@ -329,7 +329,7 @@ async def evaluate(
     }
     flag_lines  = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in rules if not r["passed"]]
     score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
-    icon = {"Buy": "✅", "Hold": "🟡", "Pass": "⬜", "Sell / Pass": "❌"}.get(verdict, "")
+    icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌"}.get(verdict, "")
 
     embed = discord.Embed(
         title=f"{icon} {verdict} — {card_name}",
