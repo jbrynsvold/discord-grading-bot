@@ -261,6 +261,7 @@ async def evaluate(
             "p_card_number": card_number or "",
         }).execute()
     except Exception as e:
+        print(f"[ERROR] Database error: {e}")
         await interaction.followup.send(f"[ERROR] Database error: {e}")
         return
 
