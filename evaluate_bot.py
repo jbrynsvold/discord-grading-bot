@@ -299,6 +299,7 @@ async def evaluate(
             color=0x5865F2,
         )
         embed.set_footer(text="Copy the # from the list above into the card_number field.")
+        
         await interaction.followup.send(embed=embed)
         return
 
@@ -411,6 +412,10 @@ async def evaluate(
     embed.add_field(name="Trend",         value=trend_str,              inline=True)
     embed.add_field(name="GIGA Score",    value=f"**{score} / 100** — {score_label}", inline=False)
     embed.set_footer(text="GIGA · Not financial advice")
+
+    image_url = card.get("image_url")
+    if image_url:
+        embed.set_thumbnail(url=image_url)
 
     await interaction.followup.send(embed=embed)
 
