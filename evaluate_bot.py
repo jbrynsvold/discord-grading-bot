@@ -133,34 +133,78 @@ def check_hard_rules(m: dict) -> list[dict]:
 # VERDICT
 # ===========================================================================
 
-def build_fail_reason(failed, score, card):
+def build_fail_reason(failed, score, card, trend_pct=None):
     failed_names = {r["name"] for r in failed}
     days_since = int(float(card.get("days_since_last_sale") or 0))
     sale_30d   = int(card.get("sale_count_30d") or 0)
     pct_range  = float(card.get("pct_of_52w_range") or 0)
 
-    if failed_names == {"HR4 recency"}:
-        return f"This card hasn't sold in {days_since} days. Without recent sales activity we can't get a reliable read on where it's actually trading. Check back if it starts moving again."
-    if failed_names == {"HR2 velocity"}:
-        return f"Trading volume has dropped well below its normal pace — only {sale_30d} sales in the last 30 days. We look for cards with consistent buyer interest before calling a setup."
+    # ── HR3 only (trend/decline) ──────────────────────────────────────────
     if failed_names == {"HR3 trend"}:
+        if sale_30d >= 20:
+            return "Lots of selling pressure right now — volume is there but the price is heading down. Wait for the trend to reverse."
         return "The price is in a meaningful decline right now. We avoid flagging cards that are actively falling — the setup needs to stabilize first."
-    if failed_names == {"HR4 recency", "HR2 velocity"}:
+
+    # ── HR2 only (velocity) ───────────────────────────────────────────────
+    if failed_names == {"HR2 velocity"}:
+        if pct_range > 60:
+            return f"Volume has dropped off and the card is near its yearly high. Low conviction at an expensive price — not a good combination."
+        if pct_range <= 20:
+            return f"The price is near its yearly low, which is attractive, but trading has slowed way down. Hard to call a setup without consistent buyer interest."
+        return f"Trading volume is below where we need it. The card hasn't done much lately — check back if activity picks up."
+
+    # ── HR4 only (recency) ────────────────────────────────────────────────
+    if failed_names == {"HR4 recency"}:
+        if days_since <= 30:
+            return f"The card hasn't sold in {days_since} days. Could be a temporary lull — worth checking back in a week or two."
+        if pct_range <= 20:
+            return f"Price is near its yearly low but the card has gone completely quiet — {days_since} days without a sale. The setup could be interesting if it wakes up."
+        return f"No sales in {days_since} days. The market has lost interest for now. Re-evaluate if it starts trading again."
+
+    # ── HR2 + HR4 ─────────────────────────────────────────────────────────
+    if failed_names == {"HR2 velocity", "HR4 recency"}:
         return f"This card has gone quiet — {sale_30d} sales in 30 days and the last one was {days_since} days ago. We need to see active trading before we can evaluate the setup."
-    if failed_names == {"HR4 recency", "HR3 trend"}:
+
+    # ── HR3 + HR4 ─────────────────────────────────────────────────────────
+    if failed_names == {"HR3 trend", "HR4 recency"}:
         return f"Price has been declining and the card hasn't sold in {days_since} days. Two red flags at once — not a setup we'd act on right now."
+
+    # ── HR2 + HR3 ─────────────────────────────────────────────────────────
     if failed_names == {"HR2 velocity", "HR3 trend"}:
-        return "Volume is thin and the price trend is heading down. We look for cards that are trading actively and holding their value before flagging a buy."
+        tp = trend_pct or 0
+        if tp < -20 and sale_30d < 5:
+            return "Volume has collapsed and the price is in a real decline. This card is in a rough spot — wait for both to stabilize."
+        return "Volume is thin and price is drifting down. Neither signal is extreme, but together they make this a pass for now."
+
+    # ── All 3 fail ────────────────────────────────────────────────────────
     if len(failed) >= 3:
         return "This card isn't trading actively, volume is thin, and the price trend is negative. None of our baseline criteria are met right now."
+
+    # ── No rule failures — low score ──────────────────────────────────────
     if not failed:
-        if pct_range > 60:
-            return f"The card has already moved up significantly from its yearly low — it's at {pct_range:.0f}% of its 52-week range. We prefer to flag cards earlier in their setup, not after they've run."
-        return f"The card passes our activity checks but the overall setup isn't strong enough yet. It's scoring {score}/100 — we look for 65+ to call a buy. Could improve if volume picks up or price pulls back further."
+        tp = trend_pct or 0
+        if pct_range <= 20 and tp > 5:
+            return f"Price is near its yearly low and starting to move — but volume isn't there yet to confirm the setup. Worth watching."
+        if pct_range <= 20:
+            return f"The price is near its yearly low which is encouraging, but trading activity is too thin to call a setup. Could be worth watching if volume picks up."
+        if pct_range <= 45:
+            return f"Nothing stands out here. The card is trading in the middle of its yearly range with no strong momentum in either direction."
+        if pct_range <= 60:
+            return f"The card has moved up from its low but hasn't broken out. At {pct_range:.0f}% of its range with a score of {score}/100, the setup isn't compelling right now."
+        if pct_range <= 80:
+            if tp > 10:
+                return f"Price is near its yearly high and still climbing. The setup has already played out — we'd rather catch this earlier. Watch for a pullback."
+            if tp < -5:
+                return f"The card ran up near its yearly high and is now pulling back. Possible re-entry later if it finds support, but too early to call."
+            return f"The card is trading near the top of its yearly range but the price has been stable — not a breakout, just historically expensive. Not an ideal entry."
+        # 80-110% handled here, Sell handles 110+
+        if tp > 10:
+            return f"Price is near its yearly high and still climbing — the setup has already played out. Watch for a pullback before considering an entry."
+        return f"Trading near the top of its yearly range at {pct_range:.0f}%. Not an ideal entry point — we prefer to flag cards earlier in their setup."
+
     return "Doesn't meet our criteria right now."
 
-
-def get_verdict(score, rules, already_spiked, pct_of_range, card=None):
+def get_verdict(score, rules, already_spiked, pct_of_range, card=None, trend_pct=None):
     all_pass = all(r["passed"] for r in rules)
     failed   = [r for r in rules if not r["passed"]]
     card     = card or {}
@@ -170,14 +214,21 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None):
     if pct_of_range is not None and pct_of_range > 110:
         return "Sell", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is running hot. If you're holding — this is a good exit point. If you're looking to buy — wait for it to cool off before entering."
     if not all_pass:
-        return "Skip", 0x888780, build_fail_reason(failed, score, card)
+        return "Skip", 0x888780, build_fail_reason(failed, score, card, trend_pct)
     if score >= 65:
+        if pct_of_range is not None and pct_of_range <= 20 and (trend_pct or 0) > 5:
+            return "Buy", 0x1D9E75, f"Strong setup. Price near its yearly low, volume is healthy, and momentum is building. All criteria met."
+        if pct_of_range is not None and (sale_30d := int(card.get("sale_count_30d") or 0)) >= 20 and pct_of_range <= 60:
+            return "Buy", 0x1D9E75, f"High conviction setup — strong volume, all rules pass, and still room to run at {pct_of_range:.0f}% of its range."
         range_str = f"sitting at just {pct_of_range:.0f}% of its yearly range" if pct_of_range is not None else "near its yearly low"
         return "Buy", 0x1D9E75, f"Everything checks out. Active trading, healthy volume, and {range_str} — this is the kind of setup we look for."
     if score >= 55:
-        return "Watch", 0xEF9F27, f"Passes our activity checks but the setup isn't quite there yet — scoring {score}/100. Worth keeping an eye on but not a strong entry right now."
-    return "Skip", 0x888780, build_fail_reason(failed, score, card)
-
+        if pct_of_range is not None and pct_of_range <= 20:
+            return "Watch", 0xEF9F27, f"Passes all our checks and sitting near its yearly low — that's promising. Score is {score}/100, just short of a buy signal. Worth keeping on your radar."
+        if (trend_pct or 0) > 5:
+            return "Watch", 0xEF9F27, f"Momentum is building and all checks pass, but the score is {score}/100 — we look for 65+ to call a buy. Could get there if the trend continues."
+        return "Watch", 0xEF9F27, f"Passes our activity checks with a score of {score}/100. Not quite a buy yet, but the setup is developing. Watch for a stronger signal."
+    return "Skip", 0x888780, build_fail_reason(failed, score, card, trend_pct)
 
 # ===========================================================================
 # BOT SETUP
@@ -294,9 +345,6 @@ async def evaluate(
     except Exception:
         pass
 
-    pct_range = fv(card.get("pct_of_52w_range"))
-    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card)
-
     card_name     = card.get("player_name", player)
     set_display   = card.get("set_name", set_name)
     card_num      = card.get("card_number")
@@ -321,6 +369,15 @@ async def evaluate(
     trend_str = "N/A"
     if current and avg_30d and avg_30d > 0:
         trend_str = f"{((current - avg_30d) / avg_30d) * 100:+.1f}%"
+
+    pct_range = fv(card.get("pct_of_52w_range"))
+
+    trend_pct_val = None
+    price_ref = fv(card.get("avg_price_3d")) or fv(card.get("current_price"))
+    if price_ref and avg_30d and avg_30d > 0:
+        trend_pct_val = ((price_ref - avg_30d) / avg_30d) * 100
+
+    verdict, color, reasoning = get_verdict(score, rules, already_spiked, pct_range, card, trend_pct_val)
 
     rule_plain = {
         "HR2 velocity": "Trading volume is too low right now",
