@@ -324,23 +324,31 @@ async def evaluate(
 
     rule_plain = {
         "HR2 velocity": "Trading volume is too low right now",
-        "HR3 trend":    "Price is in a steep decline",
         "HR4 recency":  f"Hasn't sold in {int(fv(card.get('days_since_last_sale')) or 0)} days — market gone quiet",
     }
-    flag_lines  = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in rules if not r["passed"]]
-    score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
+    flag_lines  = [f"⚠️ {rule_plain.get(r['name'], r['reason'])}" for r in rules if not r["passed"] and r["name"] in rule_plain]
+    failed_rules = [r for r in rules if not r["passed"]]
+    if failed_rules and score >= 65:
+        score_label = "Strong setup — blocked by rule"
+    elif failed_rules and score >= 55:
+        score_label = "Average setup — blocked by rule"
+    else:
+        score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
     icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌"}.get(verdict, "")
-
+    # Data confidence warning
+    total_90d_sales = fv(card.get("sale_count_90d")) or 0
+    low_data = (fv(card.get("current_price")) or 0) < 5 or total_90d_sales < 3
+    low_data_warning = "\n\n⚠️ _Limited sales data for this card — treat this result with caution._" if low_data else ""
     embed = discord.Embed(
         title=f"{icon} {verdict} — {card_name}",
         description=(
             f"{subtitle}\n\n_{reasoning}_"
             + (f"\n\n" + "\n".join(flag_lines) if flag_lines else "")
+            + low_data_warning
             + (f"\n\n📋 **On GIGA watchlist since {watchlist_entry.get('flagged_date')}**" if watchlist_entry else "")
         ),
         color=color,
     )
-
     if spike_info:
         sp = spike_info
         embed.add_field(name="⚠️ Already spiked",
