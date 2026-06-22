@@ -166,9 +166,9 @@ def get_verdict(score, rules, already_spiked, pct_of_range, card=None):
     card     = card or {}
 
     if already_spiked:
-        return "Avoid", 0xED4245, "This card has already made its move. The window has passed — buying now means chasing."
+        return "Avoid", 0xED4245, "This card has already made its move. If you're holding — consider taking profits now. If you're looking to buy — the window has passed."
     if pct_of_range is not None and pct_of_range > 110:
-        return "Avoid", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is trading well above where it's historically topped out. Not a good entry."
+        return "Sell", 0xED4245, f"At {pct_of_range:.0f}% of its yearly range, this card is running hot. If you're holding — this is a good exit point. If you're looking to buy — wait for it to cool off before entering."
     if not all_pass:
         return "Skip", 0x888780, build_fail_reason(failed, score, card)
     if score >= 65:
@@ -334,7 +334,7 @@ async def evaluate(
         score_label = "Average setup — blocked by rule"
     else:
         score_label = "Strong" if score >= 65 else "Average" if score >= 55 else "Weak"
-    icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌"}.get(verdict, "")
+    icon = {"Buy": "✅", "Watch": "🟡", "Skip": "⬜", "Avoid": "❌", "Sell": "🔴"}.get(verdict, "")
     # Data confidence warning
     total_90d_sales = fv(card.get("sale_count_90d")) or 0
     low_data = total_90d_sales < 3
