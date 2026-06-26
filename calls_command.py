@@ -5,9 +5,8 @@ Discord bot slash commands:
   /calls <date>           — calls for a specific date (YYYY-MM-DD)
   /calls today            — today's flags (still watching)
 
-Optional filters:
+Optional filter:
   sport   — e.g. NBA, MLB, NFL, Pokemon, One Piece
-  status  — hits, misses, watching
 
 Results are ephemeral — only visible to the user who ran the command.
 
@@ -45,39 +44,29 @@ def get_connection():
     return conn
 
 
-def fetch_calls(flag_date: date, sport_filter: Optional[str], status_filter: Optional[str]):
+def fetch_calls(flag_date: date, sport_filter: Optional[str]):
     conn = get_connection()
     cur  = conn.cursor()
 
-    sport_clause  = "AND LOWER(cw.sport) = LOWER(%s)" if sport_filter else ""
-    status_clause = ""
-    if status_filter == "hits":
-        status_clause = "AND cw.status = 'spiked'"
-    elif status_filter == "misses":
-        status_clause = "AND cw.status = 'missed'"
-    elif status_filter == "watching":
-        status_clause = "AND cw.status = 'watching'"
+    sport_clause_sports = "AND LOWER(cw.sport) = LOWER(%s)" if sport_filter else ""
+    sport_clause_tcg    = "AND LOWER(cw.title) = LOWER(%s)" if sport_filter else ""
 
     query = f"""
         SELECT
             c.canonical_name,
             cw.card_number,
             cw.grade,
-            cw.sport,
             cw.current_price      AS flag_price,
             cw.price_at_30d,
             cw.pct_change_30d,
-            cw.predicted_catalyst,
-            cw.giga_score,
             cw.status,
-            m.current_price       AS live_price
+            COALESCE(m.avg_price_3d, m.current_price) AS live_price
         FROM sports.candidate_watchlist cw
         JOIN cards c ON c.id = cw.card_id
         LEFT JOIN sports.mv_card_metrics m
                ON m.card_id = cw.card_id AND m.grade = cw.grade
         WHERE cw.flagged_date = %s
-        {sport_clause}
-        {status_clause}
+        {sport_clause_sports}
 
         UNION ALL
 
@@ -85,21 +74,17 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str], status_filter: Opt
             c.canonical_name,
             cw.card_number,
             cw.grade,
-            cw.title              AS sport,
             cw.current_price,
             cw.price_at_30d,
             cw.pct_change_30d,
-            cw.predicted_catalyst,
-            cw.giga_score,
             cw.status,
-            m.current_price
+            COALESCE(m.avg_price_3d, m.current_price)
         FROM tcg.candidate_watchlist cw
         JOIN cards c ON c.id = cw.card_id
         LEFT JOIN sports.mv_card_metrics m
                ON m.card_id = cw.card_id AND m.grade = cw.grade
         WHERE cw.flagged_date = %s
-        {'AND LOWER(cw.title) = LOWER(%s)' if sport_filter else ''}
-        {status_clause}
+        {sport_clause_tcg}
 
         ORDER BY giga_score DESC;
     """
@@ -146,13 +131,9 @@ def status_icon(status):
 
 
 def build_messages(flag_date: date, rows: list, is_today: bool,
-                   sport_filter: Optional[str], status_filter: Optional[str]) -> list[str]:
+                   sport_filter: Optional[str]) -> list[str]:
 
-    filter_str = ""
-    if sport_filter:
-        filter_str += f"  •  {sport_filter}"
-    if status_filter:
-        filter_str += f"  •  {status_filter} only"
+    filter_str = f"  •  {sport_filter}" if sport_filter else ""
 
     if not rows:
         label = "Today's Flags" if is_today else flag_date.strftime('%b %d, %Y')
@@ -191,15 +172,12 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
         p30        = r["price_at_30d"]
         live       = r["live_price"]
 
-        canonical  = str(r["canonical_name"] or r.get("player_name", "Unknown"))
-        card_num   = f"#{r['card_number']}" if r["card_number"] else ""
-        grade      = str(r["grade"] or "")
-        score      = r["giga_score"]
+        canonical = str(r["canonical_name"] or "Unknown")
+        card_num  = f"#{r['card_number']}" if r["card_number"] else ""
+        grade     = str(r["grade"] or "")
 
-        # Line 1: card identity
-        id_line = f"`{canonical[:55]} {card_num}  {grade} `\n"
+        id_line = f"`{canonical[:58]} {card_num}  {grade}`\n"
 
-        # Line 2: prices
         if is_today:
             price_line = (
                 f"Flag: **{fmt_price(flag_price)}**  •  "
@@ -218,9 +196,7 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
 
         if len(current) + len(block) > DISCORD_MSG_LIMIT:
             messages.append(current)
-            current = (
-                f"📋 **GC Calls — {date_label} (cont.)**{filter_str}\n"
-            )
+            current = f"📋 **GC Calls — {date_label} (cont.)**{filter_str}\n"
 
         current += block
 
@@ -232,18 +208,11 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
 @app_commands.describe(
     date="Date in YYYY-MM-DD format, or 'today' for today's flags",
     sport="Filter by sport: NBA, MLB, NFL, Pokemon, One Piece, etc.",
-    status="Filter by outcome: hits, misses, watching"
 )
-@app_commands.choices(status=[
-    app_commands.Choice(name="Hits only",    value="hits"),
-    app_commands.Choice(name="Misses only",  value="misses"),
-    app_commands.Choice(name="Watching",     value="watching"),
-])
 async def calls(
     interaction: discord.Interaction,
     date: str,
     sport: Optional[str] = None,
-    status: Optional[app_commands.Choice[str]] = None,
 ):
     is_today = date.strip().lower() == "today"
 
@@ -271,15 +240,13 @@ async def calls(
 
     await interaction.response.defer(ephemeral=True)
 
-    status_val = status.value if status else None
-
     try:
-        rows = fetch_calls(flag_date, sport, status_val)
+        rows = fetch_calls(flag_date, sport)
     except Exception as e:
         await interaction.followup.send(f"❌ Database error: `{e}`", ephemeral=True)
         return
 
-    messages = build_messages(flag_date, rows, is_today, sport, status_val)
+    messages = build_messages(flag_date, rows, is_today, sport)
     for msg in messages:
         await interaction.followup.send(msg, ephemeral=True)
 
