@@ -1,33 +1,35 @@
 """
 calls_command.py
 ----------------------------------------
-Discord bot command: !calls <YYYY-MM-DD>
+Discord bot slash command: /calls <date>
 
-Shows all GC watchlist flags from a given date as compact
-text rows — no per-card embed fields, so more fits per message.
-
-Usage:
-  !calls 2026-04-15
+Results are ephemeral — only visible to the user who ran the command.
 
 Setup:
   pip install discord.py psycopg2-binary
   Set env vars: DB_CONNECTION, DISCORD_TOKEN
+
+After deploying, run once with SYNC_COMMANDS=true to register slash commands:
+  SYNC_COMMANDS=true python calls_command.py
+Then redeploy normally without it.
 """
 
 import os
 import re
 import discord
+from discord import app_commands
 import psycopg2
 from datetime import date, datetime, timedelta
 
 DB_CONNECTION = os.environ["DB_CONNECTION"]
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+SYNC_COMMANDS = os.environ.get("SYNC_COMMANDS", "false").lower() == "true"
+
+DISCORD_MSG_LIMIT = 1900
 
 intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-DISCORD_MSG_LIMIT = 1900  # safe limit under 2000
+client  = discord.Client(intents=intents)
+tree    = app_commands.CommandTree(client)
 
 
 def get_connection():
@@ -98,7 +100,6 @@ def fmt_pct(val):
 
 
 def fmt_pct_from(a, b):
-    """% change from a to b."""
     if a is None or b is None or float(a) == 0:
         return "—"
     pct = (float(b) - float(a)) / float(a) * 100
@@ -114,15 +115,14 @@ def build_messages(flag_date: date, rows: list) -> list[str]:
     if not rows:
         return [f"📋 **GC Calls — {flag_date.strftime('%b %d, %Y')}**\nNo calls found for this date."]
 
-    is_matured   = (date.today() - flag_date).days >= 30
-    total        = len(rows)
-    spiked       = sum(1 for r in rows if r["status"] == "spiked")
-    missed       = sum(1 for r in rows if r["status"] == "missed")
-    watching     = sum(1 for r in rows if r["status"] == "watching")
-    hit_rate     = f"{round(spiked / total * 100)}%" if total else "—"
-    mature_date  = (flag_date + timedelta(days=30)).strftime("%b %d")
+    is_matured  = (date.today() - flag_date).days >= 30
+    total       = len(rows)
+    spiked      = sum(1 for r in rows if r["status"] == "spiked")
+    missed      = sum(1 for r in rows if r["status"] == "missed")
+    watching    = sum(1 for r in rows if r["status"] == "watching")
+    hit_rate    = f"{round(spiked / total * 100)}%" if total else "—"
+    mature_date = (flag_date + timedelta(days=30)).strftime("%b %d")
 
-    # ── Header block ──────────────────────────────────────────────────────────
     if is_matured:
         maturity_str = f"✅ Matured  •  Hit rate: **{hit_rate}**"
     else:
@@ -136,7 +136,6 @@ def build_messages(flag_date: date, rows: list) -> list[str]:
         f"`{'NAME':<22} {'GR':<7} {'FLAG':>7} {'30D':>7} {'NOW':>7} {'30D%':>6} {'NOW%':>6}  ST  CATALYST`\n"
     )
 
-    # ── Card rows ─────────────────────────────────────────────────────────────
     messages = []
     current  = header
 
@@ -159,11 +158,12 @@ def build_messages(flag_date: date, rows: list) -> list[str]:
             f"{status_icon(r['status'])}  {catalyst}\n"
         )
 
-        # If adding this line would exceed the limit, flush and start new message
         if len(current) + len(line) > DISCORD_MSG_LIMIT:
             messages.append(current)
-            current = f"📋 **GC Calls — {flag_date.strftime('%b %d, %Y')} (cont.)**\n"
-            current += f"`{'NAME':<22} {'GR':<7} {'FLAG':>7} {'30D':>7} {'NOW':>7} {'30D%':>6} {'NOW%':>6}  ST  CATALYST`\n"
+            current = (
+                f"📋 **GC Calls — {flag_date.strftime('%b %d, %Y')} (cont.)**\n"
+                f"`{'NAME':<22} {'GR':<7} {'FLAG':>7} {'30D':>7} {'NOW':>7} {'30D%':>6} {'NOW%':>6}  ST  CATALYST`\n"
+            )
 
         current += line
 
@@ -171,49 +171,52 @@ def build_messages(flag_date: date, rows: list) -> list[str]:
     return messages
 
 
-@client.event
-async def on_ready():
-    print(f"GC Bot ready — logged in as {client.user}")
-
-
-@client.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    content = message.content.strip()
-    if not content.lower().startswith("!calls"):
-        return
-
-    parts = content.split()
-    if len(parts) < 2:
-        await message.channel.send("❌ Usage: `!calls YYYY-MM-DD`  e.g. `!calls 2026-04-15`")
-        return
-
-    date_str = parts[1]
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
-        await message.channel.send("❌ Date must be `YYYY-MM-DD`")
+@tree.command(name="calls", description="Show GC watchlist calls for a specific date")
+@app_commands.describe(date="Date to look up in YYYY-MM-DD format (e.g. 2026-04-15)")
+async def calls(interaction: discord.Interaction, date: str):
+    # Validate date format
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        await interaction.response.send_message(
+            "❌ Date must be `YYYY-MM-DD` — e.g. `/calls 2026-04-15`",
+            ephemeral=True
+        )
         return
 
     try:
-        flag_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        flag_date = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
-        await message.channel.send("❌ Invalid date.")
+        await interaction.response.send_message("❌ Invalid date.", ephemeral=True)
         return
 
-    if flag_date > date.today():
-        await message.channel.send("❌ Can't look up a future date.")
+    from datetime import date as date_type
+    if flag_date > date_type.today():
+        await interaction.response.send_message("❌ Can't look up a future date.", ephemeral=True)
         return
 
-    async with message.channel.typing():
-        try:
-            rows = fetch_calls(flag_date)
-        except Exception as e:
-            await message.channel.send(f"❌ Database error: `{e}`")
-            return
+    # Defer ephemerally — gives us time to query the DB
+    await interaction.response.defer(ephemeral=True)
 
-        for msg in build_messages(flag_date, rows):
-            await message.channel.send(msg)
+    try:
+        rows = fetch_calls(flag_date)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Database error: `{e}`", ephemeral=True)
+        return
+
+    messages = build_messages(flag_date, rows)
+
+    # Send first message as followup, rest as additional followups
+    for i, msg in enumerate(messages):
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+@client.event
+async def on_ready():
+    if SYNC_COMMANDS:
+        print("Syncing slash commands globally...")
+        await tree.sync()
+        print("✅ Slash commands synced — restart without SYNC_COMMANDS=true")
+    else:
+        print(f"GC Bot ready — logged in as {client.user}")
 
 
 client.run(DISCORD_TOKEN)
