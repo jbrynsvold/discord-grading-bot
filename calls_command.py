@@ -59,6 +59,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
             cw.current_price      AS flag_price,
             cw.price_at_30d,
             cw.pct_change_30d,
+            cw.giga_score,
             cw.status,
             COALESCE(m.avg_price_3d, m.current_price) AS live_price
         FROM sports.candidate_watchlist cw
@@ -77,6 +78,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
             cw.current_price,
             cw.price_at_30d,
             cw.pct_change_30d,
+            cw.giga_score,
             cw.status,
             COALESCE(m.avg_price_3d, m.current_price)
         FROM tcg.candidate_watchlist cw
