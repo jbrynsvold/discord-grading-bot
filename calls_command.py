@@ -234,7 +234,7 @@ async def calls(
             return
 
         from datetime import date as date_type
-        if flag_date < date(2026, 6, 8):
+        if flag_date < datetime(2026, 6, 8).date():
             await interaction.response.send_message(
                 "❌ Calls are only available from June 8, 2026 onward.", ephemeral=True
             )
