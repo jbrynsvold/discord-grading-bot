@@ -61,7 +61,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
             cw.pct_change_30d,
             cw.giga_score,
             cw.status,
-            COALESCE(m.avg_price_3d, m.current_price) AS live_price
+            COALESCE(m.avg_price_3d, m.avg_price_7d, m.avg_price_30d, m.current_price) AS live_price
         FROM sports.candidate_watchlist cw
         JOIN cards c ON c.id = cw.card_id
         LEFT JOIN sports.mv_card_metrics m
@@ -80,7 +80,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
             cw.pct_change_30d,
             cw.giga_score,
             cw.status,
-            COALESCE(m.avg_price_3d, m.current_price)
+            COALESCE(m.avg_price_3d, m.avg_price_7d, m.avg_price_30d, m.current_price)
         FROM tcg.candidate_watchlist cw
         JOIN cards c ON c.id = cw.card_id
         LEFT JOIN sports.mv_card_metrics m
@@ -234,6 +234,12 @@ async def calls(
             return
 
         from datetime import date as date_type
+        if flag_date < date(2026, 6, 8):
+            await interaction.response.send_message(
+                "❌ Calls are only available from June 8, 2026 onward.", ephemeral=True
+            )
+            return
+
         if flag_date > date_type.today():
             await interaction.response.send_message(
                 "❌ Can't look up a future date.", ephemeral=True
