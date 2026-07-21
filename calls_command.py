@@ -5,6 +5,9 @@ Discord bot slash commands:
   /calls <date>           — calls for a specific date (YYYY-MM-DD)
   /calls today            — today's flags (still watching)
 
+Only shows A+B-tier calls (split_part(pattern_match, ' - ', 3) = 'A+B') —
+these are the only calls we're putting our name on publicly.
+
 Optional filter:
   sport   — e.g. NBA, MLB, NFL, Pokemon, One Piece
 
@@ -51,14 +54,23 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
     sport_clause_sports = "AND LOWER(cw.sport) = LOWER(%s)" if sport_filter else ""
     sport_clause_tcg    = "AND LOWER(cw.title) = LOWER(%s)" if sport_filter else ""
 
+    # A+B filter is hard-coded, not optional — these are the only calls
+    # we publicly stand behind. flag_price_3d / res_price_3d / pct_change_res_3d
+    # replace the old (now-dropped) price_at_30d / pct_change_30d columns.
+    # call_horizon_days and data_sufficiency come along so maturity is judged
+    # per-row instead of assuming a flat 30 days for every call.
     query = f"""
         SELECT
             c.canonical_name,
             cw.card_number,
             cw.grade,
             cw.current_price      AS flag_price,
-            cw.price_at_30d,
-            cw.pct_change_30d,
+            cw.flag_price_3d,
+            cw.res_price_3d,
+            cw.pct_change_res_3d,
+            cw.data_sufficiency,
+            cw.call_horizon_days,
+            cw.flagged_date,
             cw.giga_score,
             cw.status,
             COALESCE(m.avg_price_3d, m.avg_price_7d, m.avg_price_30d, m.current_price) AS live_price
@@ -67,6 +79,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
         LEFT JOIN sports.mv_card_metrics m
                ON m.card_id = cw.card_id AND m.grade = cw.grade
         WHERE cw.flagged_date = %s
+          AND split_part(cw.pattern_match, ' - ', 3) = 'A+B'
         {sport_clause_sports}
 
         UNION ALL
@@ -76,8 +89,12 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
             cw.card_number,
             cw.grade,
             cw.current_price,
-            cw.price_at_30d,
-            cw.pct_change_30d,
+            cw.flag_price_3d,
+            cw.res_price_3d,
+            cw.pct_change_res_3d,
+            cw.data_sufficiency,
+            cw.call_horizon_days,
+            cw.flagged_date,
             cw.giga_score,
             cw.status,
             COALESCE(m.avg_price_3d, m.avg_price_7d, m.avg_price_30d, m.current_price)
@@ -86,6 +103,7 @@ def fetch_calls(flag_date: date, sport_filter: Optional[str]):
         LEFT JOIN sports.mv_card_metrics m
                ON m.card_id = cw.card_id AND m.grade = cw.grade
         WHERE cw.flagged_date = %s
+          AND split_part(cw.pattern_match, ' - ', 3) = 'A+B'
         {sport_clause_tcg}
 
         ORDER BY giga_score DESC;
@@ -132,35 +150,52 @@ def status_icon(status):
     return {"spiked": "🟢", "missed": "🔴", "watching": "🟡"}.get(status or "", "⚪")
 
 
+def row_maturity(r, today: date):
+    """
+    Per-row maturity, using this call's own call_horizon_days instead of a
+    flat 30 days — long-horizon calls (offseason sports flips, TCG
+    long_hold/set_swing) can run 60-365 days, and treating them as due at
+    30 days would falsely call them matured, same bug we fixed at the DB
+    level for res_price_3d/data_sufficiency.
+    Returns (is_due, mature_date).
+    """
+    horizon = r.get("call_horizon_days") or 30
+    mature_date = r["flagged_date"] + timedelta(days=horizon)
+    return today >= mature_date, mature_date
+
+
 def build_messages(flag_date: date, rows: list, is_today: bool,
                    sport_filter: Optional[str]) -> list[str]:
 
     filter_str = f"  •  {sport_filter}" if sport_filter else ""
+    today = date.today()
 
     if not rows:
         label = "Today's Flags" if is_today else flag_date.strftime('%b %d, %Y')
-        return [f"📋 **GC Calls — {label}**{filter_str}\nNo calls found."]
+        return [f"📋 **GC Calls (A+B) — {label}**{filter_str}\nNo calls found."]
 
-    is_matured  = (date.today() - flag_date).days >= 30
     total       = len(rows)
     spiked      = sum(1 for r in rows if r["status"] == "spiked")
     missed      = sum(1 for r in rows if r["status"] == "missed")
     watching    = sum(1 for r in rows if r["status"] == "watching")
-    hit_rate    = f"{round(spiked / total * 100)}%" if total else "—"
-    mature_date = (flag_date + timedelta(days=30)).strftime("%b %d")
+    resolved    = spiked + missed
+    hit_rate    = f"{round(spiked / resolved * 100)}%" if resolved else "—"
 
     if is_today:
-        maturity_str = f"⏳ Matures {mature_date}  •  {watching} watching"
-        date_label   = f"Today's Flags — {flag_date.strftime('%b %d, %Y')}"
-    elif is_matured:
-        maturity_str = f"✅ Matured  •  Hit rate: **{hit_rate}**"
-        date_label   = flag_date.strftime('%b %d, %Y')
+        maturity_str = f"{watching} still watching"
+        date_label    = f"Today's Flags — {flag_date.strftime('%b %d, %Y')}"
+    elif resolved == total:
+        maturity_str = f"✅ All matured  •  Hit rate: **{hit_rate}**"
+        date_label    = flag_date.strftime('%b %d, %Y')
+    elif resolved > 0:
+        maturity_str = f"⏳ {resolved}/{total} matured so far  •  Hit rate on matured: **{hit_rate}**"
+        date_label    = flag_date.strftime('%b %d, %Y')
     else:
-        maturity_str = f"⏳ Matures {mature_date}  •  30d prices pending"
-        date_label   = flag_date.strftime('%b %d, %Y')
+        maturity_str = "⏳ None matured yet — horizons vary by call, see below"
+        date_label    = flag_date.strftime('%b %d, %Y')
 
     header = (
-        f"📋 **GC Calls — {date_label}**{filter_str}\n"
+        f"📋 **GC Calls (A+B) — {date_label}**{filter_str}\n"
         f"🟢 {spiked} hit  🔴 {missed} missed  🟡 {watching} watching  •  {total} total\n"
         f"{maturity_str}\n"
         f"{'─' * 40}\n"
@@ -171,8 +206,9 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
 
     for r in rows:
         flag_price = r["flag_price"]
-        p30        = r["price_at_30d"]
+        resolved_price = r["res_price_3d"] if r["data_sufficiency"] == "ok" else None
         live       = r["live_price"]
+        is_due, mature_date = row_maturity(r, today)
 
         canonical = str(r["canonical_name"] or "Unknown")
         card_num  = f"#{r['card_number']}" if r["card_number"] else ""
@@ -180,25 +216,32 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
 
         id_line = f"`{canonical[:58]} {card_num}  {grade}`\n"
 
-        if is_today:
+        if is_today or r["status"] == "watching":
+            due_str = "matures today" if is_due else f"matures {mature_date.strftime('%b %d')}"
             price_line = (
                 f"Flag: **{fmt_price(flag_price)}**  •  "
+                f"Now: **{fmt_price(live)}** ({fmt_pct_from(flag_price, live)})  "
+                f"{status_icon(r['status'])}  •  ⏳ {due_str}\n\n"
+            )
+        elif resolved_price is not None:
+            price_line = (
+                f"Flag: **{fmt_price(flag_price)}**  →  "
+                f"Resolved: **{fmt_price(resolved_price)}** ({fmt_pct(r['pct_change_res_3d'])})  →  "
                 f"Now: **{fmt_price(live)}** ({fmt_pct_from(flag_price, live)})  "
                 f"{status_icon(r['status'])}\n\n"
             )
         else:
             price_line = (
-                f"Flag: **{fmt_price(flag_price)}**  →  "
-                f"30d: **{fmt_price(p30)}** ({fmt_pct(r['pct_change_30d'])})  →  "
+                f"Flag: **{fmt_price(flag_price)}**  •  "
                 f"Now: **{fmt_price(live)}** ({fmt_pct_from(flag_price, live)})  "
-                f"{status_icon(r['status'])}\n\n"
+                f"{status_icon(r['status'])}  •  ⚠️ insufficient sales data to confirm outcome\n\n"
             )
 
         block = id_line + price_line
 
         if len(current) + len(block) > DISCORD_MSG_LIMIT:
             messages.append(current)
-            current = f"📋 **GC Calls — {date_label} (cont.)**{filter_str}\n"
+            current = f"📋 **GC Calls (A+B) — {date_label} (cont.)**{filter_str}\n"
 
         current += block
 
@@ -206,7 +249,7 @@ def build_messages(flag_date: date, rows: list, is_today: bool,
     return messages
 
 
-@tree.command(name="calls", description="Show GC watchlist calls for a date or today's flags")
+@tree.command(name="calls", description="Show GC A+B watchlist calls for a date or today's flags")
 @app_commands.describe(
     date="Date in YYYY-MM-DD format, or 'today' for today's flags",
     sport="Filter by sport: NBA, MLB, NFL, Pokemon, One Piece, etc.",
